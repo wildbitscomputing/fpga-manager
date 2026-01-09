@@ -1,0 +1,8 @@
+.program fpga_out
+.side_set 1
+
+.wrap_target
+out pins, 8 side 0   ; data on GPIO8-15, CCLK low
+nop         side 0   ; data setup time
+nop         side 1   ; pulse CCLK high
+.wrap

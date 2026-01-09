@@ -8,6 +8,8 @@
 #include "rtc.h"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
 #include "hardware/xosc.h"
 #include "hardware/structs/sio.h"
 //
@@ -16,6 +18,16 @@
 #include "pico/stdlib.h"
 #include "miniz.h"
 #include "lz4.h"
+#include "fpga_out.pio.h"
+
+// Set to 0 to use legacy GPIO bit-bang path for FPGA programming.
+#ifndef USE_PIO_FPGA
+#define USE_PIO_FPGA 1
+#endif
+
+#ifndef FPGA_PIO_CLKDIV
+#define FPGA_PIO_CLKDIV 1.0f
+#endif
 
 // datasheet for information on which other pins can be used.
 #define UART_ID uart1
@@ -103,6 +115,81 @@ unsigned char Buffer0[BUFFER_SIZE];
 //unsigned char Buffer1[BUFFER_SIZE];
 static uint8_t lz4_comp_buf[LZ4_COMP_BUF_SIZE];
 
+#if USE_PIO_FPGA
+static PIO fpga_pio = pio0;
+static int fpga_sm = -1;
+static int fpga_dma_chan = -1;
+static uint fpga_pio_offset = 0;
+static bool fpga_pio_inited = false;
+
+static void fpga_pio_init(void)
+{
+    if (fpga_pio_inited) {
+        return;
+    }
+
+    fpga_sm = pio_claim_unused_sm(fpga_pio, true);
+    fpga_dma_chan = dma_claim_unused_channel(true);
+    fpga_pio_offset = pio_add_program(fpga_pio, &fpga_out_program);
+
+    pio_sm_config cfg = fpga_out_program_get_default_config(fpga_pio_offset);
+    sm_config_set_out_pins(&cfg, FPGA_BUS_D0, 8);
+    sm_config_set_sideset_pins(&cfg, FPGA_CONFIG_CCLK);
+    sm_config_set_out_shift(&cfg, true, true, 8);
+    sm_config_set_fifo_join(&cfg, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&cfg, FPGA_PIO_CLKDIV);
+
+    pio_sm_set_consecutive_pindirs(fpga_pio, fpga_sm, FPGA_BUS_D0, 8, true);
+    pio_sm_set_consecutive_pindirs(fpga_pio, fpga_sm, FPGA_CONFIG_CCLK, 1, true);
+    pio_sm_init(fpga_pio, fpga_sm, fpga_pio_offset, &cfg);
+    pio_sm_set_enabled(fpga_pio, fpga_sm, true);
+    fpga_pio_inited = true;
+}
+
+static void fpga_pio_reset(void)
+{
+    fpga_pio_init();
+    pio_sm_clear_fifos(fpga_pio, fpga_sm);
+    pio_sm_restart(fpga_pio, fpga_sm);
+}
+
+static void fpga_pio_begin(void)
+{
+    fpga_pio_reset();
+}
+
+static void fpga_pio_set_gpio_mode(void)
+{
+    for (uint i = 0; i < 8; i++) {
+        gpio_set_function(FPGA_BUS_D0 + i, GPIO_FUNC_SIO);
+        gpio_set_dir(FPGA_BUS_D0 + i, GPIO_OUT);
+    }
+    gpio_set_function(FPGA_CONFIG_CCLK, GPIO_FUNC_SIO);
+    gpio_set_dir(FPGA_CONFIG_CCLK, GPIO_OUT);
+}
+
+static void fpga_pio_set_pio_mode(void)
+{
+    for (uint i = 0; i < 8; i++) {
+        pio_gpio_init(fpga_pio, FPGA_BUS_D0 + i);
+    }
+    pio_gpio_init(fpga_pio, FPGA_CONFIG_CCLK);
+}
+
+static void fpga_pio_enable(bool enable)
+{
+    if (!fpga_pio_inited) {
+        return;
+    }
+    if (enable) {
+        fpga_pio_set_pio_mode();
+    } else {
+        fpga_pio_set_gpio_mode();
+    }
+    pio_sm_set_enabled(fpga_pio, fpga_sm, enable);
+}
+#endif
+
 // External FPGA LZ4 blobs are stored in flash at fixed addresses.
 #define FOENIX_FLASH_LZ4_BASE0 0x10800000u
 #define FOENIX_FLASH_LZ4_BASE1 0x10A00000u
@@ -134,7 +221,7 @@ int main() {
     stdio_init_all();
     xosc_init(); // #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
     time_init();
-    //stdio_uart_init_full (uart1, BAUD_RATE, UART_TX_PIN, -1);       // Setup STDIO to Terminal UART (to be removed later)
+    stdio_uart_init_full (uart1, BAUD_RATE, UART_TX_PIN, -1);       // Setup STDIO to Terminal UART (to be removed later)
 
     f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
 
@@ -234,6 +321,9 @@ bool program_fpga_from_lz4_file(const char* path)
         f256k2_prg_block_fpga(Buffer0, (unsigned int)out_len);
     }
 
+#if USE_PIO_FPGA
+    fpga_pio_enable(false);
+#endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (unsigned int k = 0; k < 100; k++){
         gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
@@ -290,6 +380,9 @@ bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
         off += in_len;
     }
 
+#if USE_PIO_FPGA
+    fpga_pio_enable(false);
+#endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (unsigned int k = 0; k < 100; k++){
         gpio_put( FPGA_CONFIG_CCLK, 0);
@@ -369,6 +462,9 @@ bool program_fpga_from_gz_file(const char* path)
 
         if (ret == MZ_STREAM_END) {
             mz_inflateEnd(&stream);
+#if USE_PIO_FPGA
+            fpga_pio_enable(false);
+#endif
             gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
             for (unsigned int k = 0; k < 100; k++){
                 gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
@@ -554,6 +650,9 @@ bool program_fpga_from_file(FIL fil)
 
     f256k2_prg_block_fpga(Buffer0, i);       // Last Block
     //gpio_put( FPGA_CONFIG_CSn,1);          // Bring DOwn the ChipSelect
+#if USE_PIO_FPGA
+    fpga_pio_enable(false);
+#endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (k = 0; k < 100; k++){
         gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
@@ -634,6 +733,10 @@ static inline void f256k2_Set_FPGA_Data_Port(unsigned char value)
 
 void f256k2_init_prg_fpga(void)
 {
+#if USE_PIO_FPGA
+    fpga_pio_begin();
+    fpga_pio_enable(false);
+#endif
     // Bring Down Program
     gpio_put( FPGA_CONFIG_PRG, 0);
     printf("Programn is Low\n");
@@ -658,9 +761,34 @@ void f256k2_init_prg_fpga(void)
 
 void f256k2_prg_block_fpga(const uint8_t *ptr, unsigned int len)
 {
+    // printf("Programming chunk %d bytes\n", len);
+    if (!ptr || len == 0) {
+        return;
+    }
+
+#if USE_PIO_FPGA
+    if (!fpga_pio_inited) {
+        fpga_pio_begin();
+    }
+    fpga_pio_enable(true);
+
+    dma_channel_config cfg = dma_channel_get_default_config(fpga_dma_chan);
+    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_8);
+    channel_config_set_read_increment(&cfg, true);
+    channel_config_set_write_increment(&cfg, false);
+    channel_config_set_dreq(&cfg, pio_get_dreq(fpga_pio, fpga_sm, true));
+
+    dma_channel_configure(fpga_dma_chan, &cfg,
+                          &fpga_pio->txf[fpga_sm],
+                          ptr,
+                          len,
+                          true);
+    dma_channel_wait_for_finish_blocking(fpga_dma_chan);
+#else
     for (unsigned int i = 0; i < len; i++) {
         f256k2_Set_FPGA_Data_Port(*ptr++);
         sio_hw->gpio_clr = FPGA_CCLK_MASK;     // Write strobe low
         sio_hw->gpio_set = FPGA_CCLK_MASK;     // Write strobe high
     }
+#endif
 }

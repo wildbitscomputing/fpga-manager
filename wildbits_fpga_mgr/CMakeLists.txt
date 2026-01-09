@@ -47,9 +47,14 @@ add_executable(wildbits_fpga_mgr
     lz4.c
 )
 
+# Generate PIO header for FPGA data+clock output.
+pico_generate_pio_header(wildbits_fpga_mgr ${CMAKE_CURRENT_LIST_DIR}/fpga_out.pio)
+
 # Add the standard library and FatFS/SPI to the build
 target_link_libraries(wildbits_fpga_mgr
     pico_stdlib
+    hardware_dma
+    hardware_pio
     FatFs_SPI
 )
 
