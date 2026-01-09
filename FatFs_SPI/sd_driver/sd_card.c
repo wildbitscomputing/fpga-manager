@@ -447,7 +447,7 @@ static const char *cmd2str(const cmdSupported cmd) {
 }
 #endif
 
-#define SD_COMMAND_RETRIES 3 /*!< Times SPI cmd is retried when there is no response */
+#define SD_COMMAND_RETRIES 1 /*!< Times SPI cmd is retried when there is no response */
 #define SD_COMMAND_TIMEOUT 2000 /*!< Timeout in ms for response */
 
 static int sd_cmd(sd_card_t *pSD, const cmdSupported cmd, uint32_t arg,
@@ -634,7 +634,7 @@ bool sd_card_detect(sd_card_t *pSD) {
 }
 
 /*!< Number of retries for sending CMDO */
-#define SD_CMD0_GO_IDLE_STATE_RETRIES 10
+#define SD_CMD0_GO_IDLE_STATE_RETRIES 3
 
 static uint32_t sd_go_idle_state(sd_card_t *pSD) {
     uint32_t response;
@@ -650,7 +650,7 @@ static uint32_t sd_go_idle_state(sd_card_t *pSD) {
             break;
         }
         sd_release(pSD);
-        busy_wait_us(100 * 1000);
+        busy_wait_us(20 * 1000);
         sd_acquire(pSD);
     }
     return response;

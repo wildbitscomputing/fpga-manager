@@ -1,0 +1,666 @@
+#include <stdio.h>
+#include <cstdint>
+#include <cstring>
+//
+#include "f_util.h"
+#include "ff.h"
+#include "pico/stdlib.h"
+#include "rtc.h"
+#include "hardware/uart.h"
+#include "hardware/gpio.h"
+#include "hardware/xosc.h"
+#include "hardware/structs/sio.h"
+//
+#include "hw_config.h"
+#include "hardware/clocks.h"
+#include "pico/stdlib.h"
+#include "miniz.h"
+#include "lz4.h"
+
+// datasheet for information on which other pins can be used.
+#define UART_ID uart1
+#define BAUD_RATE 115200
+#define DATA_BITS 8
+#define STOP_BITS 1
+#define PARITY    UART_PARITY_NONE
+
+#define UART_TX_PIN 24
+#define UART_RX_PIN 25
+
+#define SPI_SUPER_MISO_i    0   // SPI0
+#define SPI_SUPER_CSn_i     1   // SPI0
+#define SPI_SUPER_SCLK_i    2   // SPI0
+#define SPI_SUPER_MOSI_o    3   // SPI0
+#define FPGA_CONFIG_PRG     4   // Output - Pulse to begin Sequence
+#define FPGA_SYSTEM_RSTn    5   // Output
+#define FPGA_CONFIG_CCLK    6   // Output
+#define FPGA_CONFIG_INITn   7   // Input
+// Output
+#define FPGA_BUS_D0         8
+#define FPGA_BUS_D1         9
+#define FPGA_BUS_D2         10
+#define FPGA_BUS_D3         11
+#define FPGA_BUS_D4         12
+#define FPGA_BUS_D5         13
+#define FPGA_BUS_D6         14
+#define FPGA_BUS_D7         15
+// Input
+#define F256K2_CONTEXT_SW0  16
+#define F256K2_CONTEXT_SW1  17
+#define SPI_SD_SD1          21  // Not used now
+#define SPI_SD_SD2          22  // Not used Now
+
+// UART Definition
+#define COM_TX_PIN          24  // UART1
+#define COM_RX_PIN          25  // UART1
+#define ADC0                26
+#define ADC1                27
+#define ADC2                28
+#define ADC3                29
+
+#define FPGA_SIZE           9730652
+#define BUFFER_SIZE         32768
+#define GZ_IN_BUF_SIZE      2048
+#define LZ4_COMP_BUF_SIZE   LZ4_COMPRESSBOUND(BUFFER_SIZE)
+#define FPGA_DATA_MASK      0x0000FF00u
+#define FPGA_CCLK_MASK      (1u << FPGA_CONFIG_CCLK)
+
+// Prototpyes
+void f256k2_context_man_init_io(void);
+static inline void f256k2_Set_FPGA_Data_Port(unsigned char Value);
+void f256k2_init_prg_fpga(void);
+void f256k2_prg_block_fpga(const uint8_t *ptr, unsigned int len);
+bool program_fpga_from_file(FIL fil);
+bool program_fpga_from_lz4_file(const char* path);
+bool program_fpga_from_gz_file(const char* path);
+bool program_fpga_from_file_path(const char* path);
+typedef enum {
+    FPGA_METHOD_NONE = 0,
+    FPGA_METHOD_SD_LZ4,
+    FPGA_METHOD_SD_GZIP,
+    FPGA_METHOD_SD_RAW,
+    FPGA_METHOD_FLASH_LZ4,
+    FPGA_METHOD_FLASH_GZIP,
+} fpga_method_t;
+
+static const char* const fpga_method_names[] = {
+    "none",
+    "SD LZ4",
+    "SD gzip",
+    "SD raw",
+    "FLASH LZ4",
+    "FLASH gzip",
+};
+
+fpga_method_t program_fpga_from_choice(unsigned char sw_choice);
+bool program_fpga_from_lz4_data(const uint8_t* data, size_t len);
+fpga_method_t program_fpga_from_flash_slot(unsigned char sw_choice);
+bool program_fpga_from_gzip(const uint8_t* gz_data, size_t gz_len);
+bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos);
+bool fil_read_exact(FIL* fil, void* dst, UINT len);
+
+unsigned char Buffer0[BUFFER_SIZE];
+//unsigned char Buffer1[BUFFER_SIZE];
+static uint8_t lz4_comp_buf[LZ4_COMP_BUF_SIZE];
+
+// External FPGA LZ4 blobs are stored in flash at fixed addresses.
+#define FOENIX_FLASH_LZ4_BASE0 0x10800000u
+#define FOENIX_FLASH_LZ4_BASE1 0x10A00000u
+#define FOENIX_FLASH_LZ4_BASE2 0x10C00000u
+#define FOENIX_FLASH_LZ4_BASE3 0x10E00000u
+#define FOENIX_FLASH_SLOT_SIZE (2 * 1024 * 1024u)
+
+typedef struct {
+    const char* path;
+    uint32_t flash_base;
+} fpga_image_info_t;
+
+static const fpga_image_info_t fpga_images[] = {
+    { "CNTX1/CFP95600C.bin", FOENIX_FLASH_LZ4_BASE0 },
+    { "CNTX2/CFP95616E.bin", FOENIX_FLASH_LZ4_BASE1 },
+    { "CNTX3/f256k2t9.bin",  FOENIX_FLASH_LZ4_BASE2 },
+    { "CNTX4/foenix138.bin", FOENIX_FLASH_LZ4_BASE3 },
+};
+
+// See FatFs - Generic FAT Filesystem Module, "Application Interface",
+    // http://elm-chan.org/fsw/ff/00index_e.html
+
+int main() {
+    unsigned int i;
+    unsigned int ActiveBuffer;
+    //unsigned int MailBox;
+    sd_card_t *pSD = sd_get_by_num(0);
+    //set_sys_clock_khz(266000, true);
+    stdio_init_all();
+    xosc_init(); // #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
+    time_init();
+    //stdio_uart_init_full (uart1, BAUD_RATE, UART_TX_PIN, -1);       // Setup STDIO to Terminal UART (to be removed later)
+
+    f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
+
+    absolute_time_t start = get_absolute_time();
+
+    uint8_t dip_switches = ((gpio_get_all() & 0x00030000) >> 16) & 0x03;    // Read the 2 bits from DipSwitch to know which Load with need to get in there!
+
+    fpga_method_t method;
+
+    // Let's Mount the SDCard First
+    FRESULT fr;
+    fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
+    if (FR_OK != fr) {
+      method = program_fpga_from_flash_slot(dip_switches);
+      if (method == FPGA_METHOD_NONE) {
+        panic("Programming from flash failed\n");
+      }
+    } else {
+      method = program_fpga_from_choice(dip_switches);
+    }
+
+    // measure fpga programming
+    int64_t fpga_us = absolute_time_diff_us(start, get_absolute_time());
+
+    printf("=== Cibee FPGA Loader ===\n");
+    printf("Method   : %s\n", fpga_method_names[method]);
+    printf("Time     : %lldms\n", fpga_us / 1000);
+    printf("Core Slot: %d\n", dip_switches);
+    printf("=========================\n");
+
+    f_unmount(pSD->pcName);
+    set_sys_clock_khz(133000, true); // 328us
+
+    for (;;)
+      ;
+}
+
+bool program_fpga_from_lz4_file(const char* path)
+{
+    char lz4_path[256];
+    int written = snprintf(lz4_path, sizeof(lz4_path), "%s.lz4", path);
+    if (written <= 0 || written >= (int)sizeof(lz4_path)) {
+        printf("lz4 path too long\n");
+        return false;
+    }
+
+    FIL fil;
+    FRESULT fr = f_open(&fil, lz4_path, FA_READ);
+    if (fr != FR_OK) {
+        return false;
+    }
+
+    uint32_t total_size = 0;
+    if (!fil_read_exact(&fil, &total_size, sizeof(total_size))) {
+        f_close(&fil);
+        return false;
+    }
+    if (total_size == 0x184D2204u) {
+        f_close(&fil);
+        return false;
+    }
+    (void)total_size;
+
+    printf("Programming from SD (lz4 raw): %s\n", lz4_path);
+    f256k2_init_prg_fpga();
+
+    for (;;) {
+        uint32_t out_len = 0;
+        uint32_t in_len = 0;
+        if (!fil_read_exact(&fil, &out_len, sizeof(out_len)) ||
+            !fil_read_exact(&fil, &in_len, sizeof(in_len))) {
+            printf("lz4 header read failed\n");
+            f_close(&fil);
+            return false;
+        }
+        if (out_len == 0 && in_len == 0) {
+            break;
+        }
+        if (out_len > BUFFER_SIZE || in_len > LZ4_COMP_BUF_SIZE) {
+            printf("lz4 block too large\n");
+            f_close(&fil);
+            return false;
+        }
+        if (!fil_read_exact(&fil, lz4_comp_buf, (UINT)in_len)) {
+            printf("lz4 read failed\n");
+            f_close(&fil);
+            return false;
+        }
+
+        int dec = LZ4_decompress_safe((const char*)lz4_comp_buf, (char*)Buffer0,
+                                      (int)in_len, (int)out_len);
+        if (dec < 0 || (uint32_t)dec != out_len) {
+            printf("lz4 decompress failed\n");
+            f_close(&fil);
+            return false;
+        }
+        f256k2_prg_block_fpga(Buffer0, (unsigned int)out_len);
+    }
+
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
+    for (unsigned int k = 0; k < 100; k++){
+        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    }
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+
+    f_close(&fil);
+    return true;
+}
+
+bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
+{
+    if (!data || len < 4) {
+        return false;
+    }
+    uint32_t total_size = (uint32_t)data[0] |
+                          ((uint32_t)data[1] << 8) |
+                          ((uint32_t)data[2] << 16) |
+                          ((uint32_t)data[3] << 24);
+    (void)total_size;
+
+    size_t off = 4;
+    f256k2_init_prg_fpga();
+
+    while (off + 8 <= len) {
+        uint32_t out_len = (uint32_t)data[off] |
+                           ((uint32_t)data[off + 1] << 8) |
+                           ((uint32_t)data[off + 2] << 16) |
+                           ((uint32_t)data[off + 3] << 24);
+        uint32_t in_len = (uint32_t)data[off + 4] |
+                          ((uint32_t)data[off + 5] << 8) |
+                          ((uint32_t)data[off + 6] << 16) |
+                          ((uint32_t)data[off + 7] << 24);
+        off += 8;
+        if (out_len == 0 && in_len == 0) {
+            break;
+        }
+        if (out_len > BUFFER_SIZE || in_len > LZ4_COMP_BUF_SIZE) {
+            printf("flash lz4 block too large\n");
+            return false;
+        }
+        if (off + in_len > len) {
+            printf("flash lz4 truncated\n");
+            return false;
+        }
+        int dec = LZ4_decompress_safe((const char*)(data + off), (char*)Buffer0,
+                                      (int)in_len, (int)out_len);
+        if (dec < 0 || (uint32_t)dec != out_len) {
+            printf("flash lz4 decompress failed\n");
+            return false;
+        }
+        f256k2_prg_block_fpga(Buffer0, (unsigned int)out_len);
+        off += in_len;
+    }
+
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
+    for (unsigned int k = 0; k < 100; k++){
+        gpio_put( FPGA_CONFIG_CCLK, 0);
+        gpio_put( FPGA_CONFIG_CCLK, 1);
+    }
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+
+    return true;
+}
+
+bool program_fpga_from_gz_file(const char* path)
+{
+    char gz_path[256];
+    int written = snprintf(gz_path, sizeof(gz_path), "%s.gz", path);
+    if (written <= 0 || written >= (int)sizeof(gz_path)) {
+        printf("gzip path too long\n");
+        return false;
+    }
+
+    FIL fil;
+    FRESULT fr = f_open(&fil, gz_path, FA_READ);
+    if (fr != FR_OK) {
+        return false;
+    }
+
+    static uint8_t in_buf[GZ_IN_BUF_SIZE];
+    UINT in_len = 0;
+    UINT in_pos = 0;
+
+    if (!gzip_skip_header(&fil, in_buf, &in_len, &in_pos)) {
+        printf("gzip header error\n");
+        f_close(&fil);
+        return false;
+    }
+
+    printf("Programming from SD (gzip): %s\n", gz_path);
+    mz_stream stream;
+    memset(&stream, 0, sizeof(stream));
+
+    int ret = mz_inflateInit2(&stream, -MZ_DEFAULT_WINDOW_BITS);
+    if (ret != MZ_OK) {
+        printf("inflate init failed: %d\n", ret);
+        f_close(&fil);
+        return false;
+    }
+
+    f256k2_init_prg_fpga();
+
+    bool eof = false;
+    stream.next_in = in_buf + in_pos;
+    stream.avail_in = in_len - in_pos;
+
+    for (;;) {
+        if (stream.avail_in == 0) {
+            UINT br = 0;
+            fr = f_read(&fil, in_buf, sizeof(in_buf), &br);
+            if (fr != FR_OK) {
+                printf("gzip read failed\n");
+                mz_inflateEnd(&stream);
+                f_close(&fil);
+                return false;
+            }
+            if (br == 0) {
+                eof = true;
+            }
+            stream.next_in = in_buf;
+            stream.avail_in = br;
+        }
+
+        stream.next_out = Buffer0;
+        stream.avail_out = BUFFER_SIZE;
+        ret = mz_inflate(&stream, MZ_NO_FLUSH);
+        size_t produced = BUFFER_SIZE - stream.avail_out;
+        if (produced > 0) {
+            f256k2_prg_block_fpga(Buffer0, (unsigned int)produced);
+        }
+
+        if (ret == MZ_STREAM_END) {
+            mz_inflateEnd(&stream);
+            gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
+            for (unsigned int k = 0; k < 100; k++){
+                gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+                gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+            }
+            gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+            f_close(&fil);
+            return true;
+        }
+        if (ret != MZ_OK) {
+            printf("inflate failed: %d\n", ret);
+            mz_inflateEnd(&stream);
+            f_close(&fil);
+            return false;
+        }
+        if (eof && stream.avail_in == 0) {
+            printf("gzip truncated\n");
+            mz_inflateEnd(&stream);
+            f_close(&fil);
+            return false;
+        }
+    }
+}
+
+bool program_fpga_from_file_path(const char* path)
+{
+    FIL fil;
+    FRESULT fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) {
+        return false;
+    }
+
+    printf("Programming from SD (raw): %s\n", path);
+    bool ok = program_fpga_from_file(fil);
+    f_close(&fil);
+    return ok;
+}
+
+fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
+{
+    const fpga_image_info_t* info = &fpga_images[sw_choice & 0x03];
+    printf("Opening %s\n", info->path);
+
+    if (program_fpga_from_lz4_file(info->path)) {
+        return FPGA_METHOD_SD_LZ4;
+    }
+    if (program_fpga_from_gz_file(info->path)) {
+        return FPGA_METHOD_SD_GZIP;
+    }
+    if (program_fpga_from_file_path(info->path)) {
+        return FPGA_METHOD_SD_RAW;
+    }
+    if (info->flash_base > 0) {
+        printf("Programming from flash (lz4 slot %u)\n", (unsigned)(sw_choice & 0x03));
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
+        if (program_fpga_from_lz4_data(data, FOENIX_FLASH_SLOT_SIZE)) {
+            return FPGA_METHOD_FLASH_LZ4;
+        }
+    }
+    printf("File Not Found!\n");
+    return FPGA_METHOD_NONE;
+}
+
+fpga_method_t program_fpga_from_flash_slot(unsigned char sw_choice)
+{
+    const fpga_image_info_t* info = &fpga_images[sw_choice & 0x03];
+    if (info->flash_base == 0u) {
+        return FPGA_METHOD_NONE;
+    }
+
+    printf("Programming from flash (lz4 slot %u)\n", (unsigned)(sw_choice & 0x03));
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
+    if (program_fpga_from_lz4_data(data, FOENIX_FLASH_SLOT_SIZE)) {
+        return FPGA_METHOD_FLASH_LZ4;
+    }
+    return FPGA_METHOD_NONE;
+}
+
+bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos)
+{
+    auto read_byte = [&](uint8_t* out) -> bool {
+        if (*in_pos >= *in_len) {
+            UINT br = 0;
+            FRESULT fr = f_read(fil, in_buf, GZ_IN_BUF_SIZE, &br);
+            if (fr != FR_OK || br == 0) {
+                return false;
+            }
+            *in_len = br;
+            *in_pos = 0;
+        }
+        *out = in_buf[(*in_pos)++];
+        return true;
+    };
+
+    uint8_t hdr[10];
+    for (size_t i = 0; i < sizeof(hdr); i++) {
+        if (!read_byte(&hdr[i])) {
+            return false;
+        }
+    }
+
+    if (hdr[0] != 0x1f || hdr[1] != 0x8b || hdr[2] != 8) {
+        return false;
+    }
+
+    uint8_t flg = hdr[3];
+    if (flg & 0x04) {
+        uint8_t b0 = 0, b1 = 0;
+        if (!read_byte(&b0) || !read_byte(&b1)) {
+            return false;
+        }
+        uint16_t xlen = (uint16_t)b0 | ((uint16_t)b1 << 8);
+        for (uint16_t i = 0; i < xlen; i++) {
+            uint8_t tmp = 0;
+            if (!read_byte(&tmp)) {
+                return false;
+            }
+        }
+    }
+    if (flg & 0x08) {
+        uint8_t c = 0;
+        do {
+            if (!read_byte(&c)) {
+                return false;
+            }
+        } while (c != 0);
+    }
+    if (flg & 0x10) {
+        uint8_t c = 0;
+        do {
+            if (!read_byte(&c)) {
+                return false;
+            }
+        } while (c != 0);
+    }
+    if (flg & 0x02) {
+        uint8_t tmp = 0;
+        if (!read_byte(&tmp) || !read_byte(&tmp)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool fil_read_exact(FIL* fil, void* dst, UINT len)
+{
+    UINT total = 0;
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    while (total < len) {
+        UINT br = 0;
+        FRESULT fr = f_read(fil, out + total, len - total, &br);
+        if (fr != FR_OK || br == 0) {
+            return false;
+        }
+        total += br;
+    }
+    return true;
+}
+
+bool program_fpga_from_file(FIL fil)
+{
+    unsigned int i, j, k = 0;
+    unsigned int BlockCount = 0;
+
+    printf("All is Good, File is open!\n");
+    FSIZE_t File_Size = f_size(&fil); // Okay let's get the Size
+    printf("The File Size is: %X\n", File_Size);
+
+    //multicore_launch_core1(f256k2_prg_block_fpga);    // Get the Second Core Going
+
+    //printf("The Core1 is Started and the Code is: %X\n", MailBox);
+    f256k2_init_prg_fpga();
+    do {
+        f_lseek(&fil, k);
+        FRESULT ReadStat = f_read (&fil, Buffer0, BUFFER_SIZE, &j);      // J = How many were read
+        k = k + j;  //
+        i = BUFFER_SIZE - j;
+        //printf("Block #: %d Byte Read: %d %d\n", BlockCount++, j);
+        f256k2_prg_block_fpga(Buffer0, j);
+    }
+    while ( i == 0);    // Process Blocks of 32K first
+
+    f256k2_prg_block_fpga(Buffer0, i);       // Last Block
+    //gpio_put( FPGA_CONFIG_CSn,1);          // Bring DOwn the ChipSelect
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
+    for (k = 0; k < 100; k++){
+        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    }
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+
+    return true;
+}
+
+// This could have been done with a loop but for the sake of simplicity, I am numerating
+void f256k2_context_man_init_io(void)
+{
+    // GPIO Init
+    gpio_init(FPGA_CONFIG_PRG);     // Output - Pulse to begin Sequence
+    //gpio_init(FPGA_CONFIG_DONE);    // Input
+    gpio_init(FPGA_CONFIG_CCLK);    // Output
+    gpio_init(FPGA_CONFIG_INITn);   // Input
+    gpio_init(FPGA_SYSTEM_RSTn);   // I/O
+    //gpio_init(FPGA_CONFIG_CSn);     // Output
+
+    gpio_init(FPGA_BUS_D0);         // Output
+    gpio_init(FPGA_BUS_D1);         // Output
+    gpio_init(FPGA_BUS_D2);         // Output
+    gpio_init(FPGA_BUS_D3);         // Output
+    gpio_init(FPGA_BUS_D4);         // Output
+    gpio_init(FPGA_BUS_D5);         // Output
+    gpio_init(FPGA_BUS_D6);         // Output
+    gpio_init(FPGA_BUS_D7);         // Output
+
+    gpio_init(SPI_SD_SD1);          // Output (Not used right now)
+    gpio_init(SPI_SD_SD2);          // Output (Not used right now)
+
+    gpio_init(F256K2_CONTEXT_SW0);  // Input
+    gpio_init(F256K2_CONTEXT_SW1);  // Input
+    // GPIOs Direction
+    gpio_set_dir(FPGA_CONFIG_PRG, GPIO_OUT);
+    //gpio_set_dir(FPGA_CONFIG_DONE, GPIO_IN);
+    gpio_set_dir(FPGA_CONFIG_CCLK, GPIO_OUT);
+    gpio_set_dir(FPGA_CONFIG_INITn, GPIO_IN);
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+    //gpio_set_dir(FPGA_CONFIG_CSn, GPIO_OUT);
+
+    gpio_set_dir(SPI_SD_SD1, GPIO_OUT);
+    gpio_set_dir(SPI_SD_SD2, GPIO_OUT);
+
+    gpio_set_dir(FPGA_BUS_D0, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D1, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D2, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D3, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D4, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D5, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D6, GPIO_OUT);
+    gpio_set_dir(FPGA_BUS_D7, GPIO_OUT);
+
+    gpio_set_dir(F256K2_CONTEXT_SW0, GPIO_IN);
+    gpio_set_dir(F256K2_CONTEXT_SW1, GPIO_IN);
+
+    gpio_put( FPGA_CONFIG_PRG, 1);
+    gpio_put( FPGA_CONFIG_CCLK, 1);
+    gpio_put( FPGA_SYSTEM_RSTn, 0); // Set the Output to 0, but we are going to switch between Tri-State(Read) and OUtput (0)
+
+    gpio_put( SPI_SD_SD1, 1);
+    gpio_put( SPI_SD_SD2, 1);
+
+    //gpio_put( FPGA_CONFIG_CSn, 1);
+
+    //    gpio_pull_up( xxxx ); // Just in Case I might need this
+}
+
+// This is to Set the DataPort GPIO8--GPIO15
+static inline void f256k2_Set_FPGA_Data_Port(unsigned char value)
+{
+    uint32_t set_mask = ((uint32_t)value << 8) & FPGA_DATA_MASK;
+    sio_hw->gpio_clr = FPGA_DATA_MASK;
+    sio_hw->gpio_set = set_mask;
+}
+
+void f256k2_init_prg_fpga(void)
+{
+    // Bring Down Program
+    gpio_put( FPGA_CONFIG_PRG, 0);
+    printf("Programn is Low\n");
+    do {
+        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    }
+    while ( gpio_get(FPGA_CONFIG_INITn));       // Wait Till it gets down
+    printf("Initn is Low\n");
+    gpio_put( FPGA_CONFIG_PRG,1);
+    printf("Programn is High\n");
+    do {
+        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    }
+    while ( gpio_get(FPGA_CONFIG_INITn) == 0);       // Wait Till it gets up
+    printf("Initn is Hi\n");
+    gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+    gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    //gpio_put( FPGA_CONFIG_CSn, 0);          // Bring Down the ChipSelect
+}
+
+void f256k2_prg_block_fpga(const uint8_t *ptr, unsigned int len)
+{
+    for (unsigned int i = 0; i < len; i++) {
+        f256k2_Set_FPGA_Data_Port(*ptr++);
+        sio_hw->gpio_clr = FPGA_CCLK_MASK;     // Write strobe low
+        sio_hw->gpio_set = FPGA_CCLK_MASK;     // Write strobe high
+    }
+}
