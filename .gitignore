@@ -1,1 +1,13 @@
 !.vscode/*
+.vscode/.browse.VC.db
+.vscode/.browse.VC.db*
+.vscode/ipch/
+.vscode/.cache/
+.vscode/.clangd/
+.vscode/*.log
+.vscode/.cortex-debug*
+build
+fpga/*.bin
+fpga/*.gz
+fpga/*.lz4
+*.xlsx

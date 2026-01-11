@@ -1,4 +1,4 @@
-# wildbits_fpga_mgr
+# fpga_mgr
 
 RP2040 (Raspberry Pi Pico) firmware that programs a Wildbits/FOENiX FPGA from
 an SD card, with an optional fallback to preloaded LZ4 images stored in flash.
@@ -52,9 +52,9 @@ cmake --build .
 
 Artifacts (in `build/`):
 
-- `wildbits_fpga_mgr.uf2` (main firmware)
-- `wildbits_fpga_mgr.elf` / `wildbits_fpga_mgr.bin`
-- `wildbits_fpga_mgr_with_fpga.uf2` (if `picotool` + Python are found)
+- `fpga_mgr.uf2` (main firmware)
+- `fpga_mgr.elf` / `fpga_mgr.bin`
+- `fpga_mgr_with_fpga.uf2` (if `picotool` + Python are found)
 
 ## Combined UF2 with FPGA images
 
@@ -62,7 +62,7 @@ If `picotool` and Python 3 are available, CMake exposes a target that bundles
 the firmware UF2 with the LZ4 images from `fpga/` into one UF2:
 
 ```sh
-cmake --build . --target wildbits_fpga_mgr_with_fpga_uf2
+cmake --build . --target fpga_mgr_with_fpga_uf2
 ```
 
 ## Tools

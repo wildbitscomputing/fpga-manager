@@ -6,7 +6,6 @@
 #include "ff.h"
 #include "pico/stdlib.h"
 #include "rtc.h"
-#include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
@@ -15,7 +14,6 @@
 //
 #include "hw_config.h"
 #include "hardware/clocks.h"
-#include "pico/stdlib.h"
 #include "miniz.h"
 #include "lz4.h"
 #include "fpga_out.pio.h"
@@ -107,12 +105,10 @@ static const char* const fpga_method_names[] = {
 fpga_method_t program_fpga_from_choice(unsigned char sw_choice);
 bool program_fpga_from_lz4_data(const uint8_t* data, size_t len);
 fpga_method_t program_fpga_from_flash_slot(unsigned char sw_choice);
-bool program_fpga_from_gzip(const uint8_t* gz_data, size_t gz_len);
 bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos);
 bool fil_read_exact(FIL* fil, void* dst, UINT len);
 
 unsigned char Buffer0[BUFFER_SIZE];
-//unsigned char Buffer1[BUFFER_SIZE];
 static uint8_t lz4_comp_buf[LZ4_COMP_BUF_SIZE];
 
 #if USE_PIO_FPGA
@@ -213,9 +209,6 @@ static const fpga_image_info_t fpga_images[] = {
     // http://elm-chan.org/fsw/ff/00index_e.html
 
 int main() {
-    unsigned int i;
-    unsigned int ActiveBuffer;
-    //unsigned int MailBox;
     sd_card_t *pSD = sd_get_by_num(0);
     //set_sys_clock_khz(266000, true);
     stdio_init_all();
@@ -326,8 +319,8 @@ bool program_fpga_from_lz4_file(const char* path)
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (unsigned int k = 0; k < 100; k++){
-        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
 
@@ -385,8 +378,8 @@ bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (unsigned int k = 0; k < 100; k++){
-        gpio_put( FPGA_CONFIG_CCLK, 0);
-        gpio_put( FPGA_CONFIG_CCLK, 1);
+        gpio_put(FPGA_CONFIG_CCLK, 0);
+        gpio_put(FPGA_CONFIG_CCLK, 1);
     }
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
 
@@ -467,8 +460,8 @@ bool program_fpga_from_gz_file(const char* path)
 #endif
             gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
             for (unsigned int k = 0; k < 100; k++){
-                gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-                gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+                gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+                gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
             }
             gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
             f_close(&fil);
@@ -628,11 +621,6 @@ bool fil_read_exact(FIL* fil, void* dst, UINT len)
 bool program_fpga_from_file(FIL fil)
 {
     unsigned int i, j, k = 0;
-    unsigned int BlockCount = 0;
-
-    printf("All is Good, File is open!\n");
-    FSIZE_t File_Size = f_size(&fil); // Okay let's get the Size
-    printf("The File Size is: %X\n", File_Size);
 
     //multicore_launch_core1(f256k2_prg_block_fpga);    // Get the Second Core Going
 
@@ -640,23 +628,23 @@ bool program_fpga_from_file(FIL fil)
     f256k2_init_prg_fpga();
     do {
         f_lseek(&fil, k);
-        FRESULT ReadStat = f_read (&fil, Buffer0, BUFFER_SIZE, &j);      // J = How many were read
+        (void)f_read(&fil, Buffer0, BUFFER_SIZE, &j);      // J = How many were read
         k = k + j;  //
         i = BUFFER_SIZE - j;
         //printf("Block #: %d Byte Read: %d %d\n", BlockCount++, j);
         f256k2_prg_block_fpga(Buffer0, j);
     }
-    while ( i == 0);    // Process Blocks of 32K first
+    while (i == 0);    // Process Blocks of 32K first
 
     f256k2_prg_block_fpga(Buffer0, i);       // Last Block
-    //gpio_put( FPGA_CONFIG_CSn,1);          // Bring DOwn the ChipSelect
+    //gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
 #if USE_PIO_FPGA
     fpga_pio_enable(false);
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (k = 0; k < 100; k++){
-        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
 
@@ -711,16 +699,16 @@ void f256k2_context_man_init_io(void)
     gpio_set_dir(F256K2_CONTEXT_SW0, GPIO_IN);
     gpio_set_dir(F256K2_CONTEXT_SW1, GPIO_IN);
 
-    gpio_put( FPGA_CONFIG_PRG, 1);
-    gpio_put( FPGA_CONFIG_CCLK, 1);
-    gpio_put( FPGA_SYSTEM_RSTn, 0); // Set the Output to 0, but we are going to switch between Tri-State(Read) and OUtput (0)
+    gpio_put(FPGA_CONFIG_PRG, 1);
+    gpio_put(FPGA_CONFIG_CCLK, 1);
+    gpio_put(FPGA_SYSTEM_RSTn, 0); // Set the Output to 0, but we are going to switch between Tri-State(Read) and OUtput (0)
 
-    gpio_put( SPI_SD_SD1, 1);
-    gpio_put( SPI_SD_SD2, 1);
+    gpio_put(SPI_SD_SD1, 1);
+    gpio_put(SPI_SD_SD2, 1);
 
-    //gpio_put( FPGA_CONFIG_CSn, 1);
+    //gpio_put(FPGA_CONFIG_CSn, 1);
 
-    //    gpio_pull_up( xxxx ); // Just in Case I might need this
+    //    gpio_pull_up(xxxx); // Just in Case I might need this
 }
 
 // This is to Set the DataPort GPIO8--GPIO15
@@ -738,25 +726,25 @@ void f256k2_init_prg_fpga(void)
     fpga_pio_enable(false);
 #endif
     // Bring Down Program
-    gpio_put( FPGA_CONFIG_PRG, 0);
+    gpio_put(FPGA_CONFIG_PRG, 0);
     printf("Programn is Low\n");
     do {
-        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }
-    while ( gpio_get(FPGA_CONFIG_INITn));       // Wait Till it gets down
+    while (gpio_get(FPGA_CONFIG_INITn));       // Wait Till it gets down
     printf("Initn is Low\n");
-    gpio_put( FPGA_CONFIG_PRG,1);
+    gpio_put(FPGA_CONFIG_PRG, 1);
     printf("Programn is High\n");
     do {
-        gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }
-    while ( gpio_get(FPGA_CONFIG_INITn) == 0);       // Wait Till it gets up
+    while (gpio_get(FPGA_CONFIG_INITn) == 0);       // Wait Till it gets up
     printf("Initn is Hi\n");
-    gpio_put( FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-    gpio_put( FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
-    //gpio_put( FPGA_CONFIG_CSn, 0);          // Bring Down the ChipSelect
+    gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
+    gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    //gpio_put(FPGA_CONFIG_CSn, 0);          // Bring Down the ChipSelect
 }
 
 void f256k2_prg_block_fpga(const uint8_t *ptr, unsigned int len)
