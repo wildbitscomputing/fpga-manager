@@ -1,6 +1,6 @@
 # fpga_mgr
 
-RP2040 (Raspberry Pi Pico) firmware that programs a Wildbits/FOENiX FPGA from
+RP2040 (Raspberry Pi Pico) firmware that programs a Wildbits/Foenix FPGA from
 an SD card, with an optional fallback to preloaded LZ4 images stored in flash.
 
 ## What it does
@@ -8,7 +8,7 @@ an SD card, with an optional fallback to preloaded LZ4 images stored in flash.
 - Reads a 2-bit context DIP switch to select one of four FPGA slots.
 - Attempts SD card programming first (LZ4 blocks, gzip, then raw .bin).
 - Falls back to LZ4 images stored in fixed flash slots if SD is unavailable.
-- Prints the chosen method and timing over USB stdio.
+- Prints the chosen method and timing over USB stdio if enabled.
 
 ## SD card layout
 
