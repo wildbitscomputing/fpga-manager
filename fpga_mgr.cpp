@@ -639,6 +639,7 @@ bool program_fpga_from_file(FIL fil)
     f256k2_prg_block_fpga(Buffer0, i);       // Last Block
     //gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
 #if USE_PIO_FPGA
+    fpga_pio_begin();
     fpga_pio_enable(false);
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
