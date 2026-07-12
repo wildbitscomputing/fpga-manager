@@ -7,6 +7,8 @@
 .vscode/*.log
 .vscode/.cortex-debug*
 build
+build_*/
+.DS_Store
 fpga/*.bin
 fpga/*.gz
 fpga/*.lz4

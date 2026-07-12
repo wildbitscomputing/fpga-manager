@@ -84,6 +84,8 @@ bool program_fpga_from_file(FIL fil);
 bool program_fpga_from_lz4_file(const char* path);
 bool program_fpga_from_gz_file(const char* path);
 bool program_fpga_from_file_path(const char* path);
+bool program_fpga_from_lz4_file_path(const char* lz4_path);
+bool program_fpga_from_gz_file_path(const char* gz_path);
 typedef enum {
     FPGA_METHOD_NONE = 0,
     FPGA_METHOD_SD_LZ4,
@@ -194,16 +196,124 @@ static void fpga_pio_enable(bool enable)
 #define FOENIX_FLASH_SLOT_SIZE (2 * 1024 * 1024u)
 
 typedef struct {
-    const char* path;
+    const char* base_path;
+    const char* fallback_filename;
     uint32_t flash_base;
 } fpga_image_info_t;
 
 static const fpga_image_info_t fpga_images[] = {
-    { "CNTX1/CFP95600C.bin", FOENIX_FLASH_LZ4_BASE0 },
-    { "CNTX2/CFP95616E.bin", FOENIX_FLASH_LZ4_BASE1 },
-    { "CNTX3/f256k2t9.bin",  FOENIX_FLASH_LZ4_BASE2 },
-    { "CNTX4/foenix138.bin", FOENIX_FLASH_LZ4_BASE3 },
+    { "CNTX1", "CFP95600C.bin", FOENIX_FLASH_LZ4_BASE0 },
+    { "CNTX2", "CFP95616E.bin", FOENIX_FLASH_LZ4_BASE1 },
+    { "CNTX3", "f256k2t9.bin",  FOENIX_FLASH_LZ4_BASE2 },
+    { "CNTX4", "foenix138.bin", FOENIX_FLASH_LZ4_BASE3 },
 };
+
+static char ascii_tolower(char c)
+{
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c - 'A' + 'a');
+    }
+    return c;
+}
+
+static bool starts_with_casefold(const char* text, const char* prefix)
+{
+    if (!text || !prefix) {
+        return false;
+    }
+    while (*prefix) {
+        if (*text == '\0' || ascii_tolower(*text) != ascii_tolower(*prefix)) {
+            return false;
+        }
+        ++text;
+        ++prefix;
+    }
+    return true;
+}
+
+static bool ends_with_casefold(const char* text, const char* suffix)
+{
+    if (!text || !suffix) {
+        return false;
+    }
+    size_t text_len = strlen(text);
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > text_len) {
+        return false;
+    }
+    const char* tail = text + (text_len - suffix_len);
+    for (size_t i = 0; i < suffix_len; i++) {
+        if (ascii_tolower(tail[i]) != ascii_tolower(suffix[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int compare_casefold(const char* a, const char* b)
+{
+    while (*a && *b) {
+        char ca = ascii_tolower(*a);
+        char cb = ascii_tolower(*b);
+        if (ca != cb) {
+            return (ca < cb) ? -1 : 1;
+        }
+        ++a;
+        ++b;
+    }
+    if (*a == *b) {
+        return 0;
+    }
+    return (*a == '\0') ? -1 : 1;
+}
+
+static bool find_wildbits_image(const char* dir, const char* suffix, char* out_path, size_t out_path_size)
+{
+    if (!dir || !suffix || !out_path || out_path_size == 0) {
+        return false;
+    }
+
+    DIR dp;
+    FILINFO fno;
+    FRESULT fr = f_opendir(&dp, dir);
+    if (fr != FR_OK) {
+        return false;
+    }
+
+    bool found = false;
+    char best_name[256];
+    best_name[0] = '\0';
+    for (;;) {
+        fr = f_readdir(&dp, &fno);
+        if (fr != FR_OK || fno.fname[0] == '\0') {
+            break;
+        }
+        if (fno.fattrib & AM_DIR) {
+            continue;
+        }
+        if (!starts_with_casefold(fno.fname, "Wildbits")) {
+            continue;
+        }
+        if (!ends_with_casefold(fno.fname, suffix)) {
+            continue;
+        }
+        if (!found || compare_casefold(fno.fname, best_name) > 0) {
+            int name_len = snprintf(best_name, sizeof(best_name), "%s", fno.fname);
+            if (name_len <= 0 || name_len >= (int)sizeof(best_name)) {
+                continue;
+            }
+            found = true;
+        }
+    }
+    if (found) {
+        int written = snprintf(out_path, out_path_size, "%s/%s", dir, best_name);
+        if (written <= 0 || written >= (int)out_path_size) {
+            found = false;
+        }
+    }
+    f_closedir(&dp);
+    return found;
+}
 
 // See FatFs - Generic FAT Filesystem Module, "Application Interface",
     // http://elm-chan.org/fsw/ff/00index_e.html
@@ -239,11 +349,11 @@ int main() {
     // measure fpga programming
     int64_t fpga_us = absolute_time_diff_us(start, get_absolute_time());
 
-    printf("=== Cibee FPGA Loader ===\n");
+    printf("=== Wildbits FPGA Loader ===\n");
     printf("Method   : %s\n", fpga_method_names[method]);
     printf("Time     : %lldms\n", fpga_us / 1000);
     printf("Core Slot: %d\n", dip_switches);
-    printf("=========================\n");
+    printf("============================\n");
 
     f_unmount(pSD->pcName);
     set_sys_clock_khz(133000, true); // 328us
@@ -260,7 +370,11 @@ bool program_fpga_from_lz4_file(const char* path)
         printf("lz4 path too long\n");
         return false;
     }
+    return program_fpga_from_lz4_file_path(lz4_path);
+}
 
+bool program_fpga_from_lz4_file_path(const char* lz4_path)
+{
     FIL fil;
     FRESULT fr = f_open(&fil, lz4_path, FA_READ);
     if (fr != FR_OK) {
@@ -394,7 +508,11 @@ bool program_fpga_from_gz_file(const char* path)
         printf("gzip path too long\n");
         return false;
     }
+    return program_fpga_from_gz_file_path(gz_path);
+}
 
+bool program_fpga_from_gz_file_path(const char* gz_path)
+{
     FIL fil;
     FRESULT fr = f_open(&fil, gz_path, FA_READ);
     if (fr != FR_OK) {
@@ -499,15 +617,48 @@ bool program_fpga_from_file_path(const char* path)
 fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
 {
     const fpga_image_info_t* info = &fpga_images[sw_choice & 0x03];
-    printf("Opening %s\n", info->path);
+    char fallback_path[256];
+    char wildbits_path[256];
+    int written = snprintf(fallback_path, sizeof(fallback_path), "%s/%s",
+                           info->base_path, info->fallback_filename);
+    if (written <= 0 || written >= (int)sizeof(fallback_path)) {
+        printf("Fallback path too long\n");
+        return FPGA_METHOD_NONE;
+    }
 
-    if (program_fpga_from_lz4_file(info->path)) {
+    printf("FPGA slot %u base path: %s, fallback file: %s\n",
+           (unsigned)(sw_choice & 0x03), info->base_path, info->fallback_filename);
+    printf("Searching %s for Wildbits*.{lz4,gz,bin}\n", info->base_path);
+    if (find_wildbits_image(info->base_path, ".lz4", wildbits_path, sizeof(wildbits_path))) {
+        printf("Selected Wildbits LZ4 image: %s\n", wildbits_path);
+        if (program_fpga_from_lz4_file_path(wildbits_path)) {
+            return FPGA_METHOD_SD_LZ4;
+        }
+        printf("Wildbits LZ4 failed, continuing fallback\n");
+    }
+    if (find_wildbits_image(info->base_path, ".gz", wildbits_path, sizeof(wildbits_path))) {
+        printf("Selected Wildbits gzip image: %s\n", wildbits_path);
+        if (program_fpga_from_gz_file_path(wildbits_path)) {
+            return FPGA_METHOD_SD_GZIP;
+        }
+        printf("Wildbits gzip failed, continuing fallback\n");
+    }
+    if (find_wildbits_image(info->base_path, ".bin", wildbits_path, sizeof(wildbits_path))) {
+        printf("Selected Wildbits raw image: %s\n", wildbits_path);
+        if (program_fpga_from_file_path(wildbits_path)) {
+            return FPGA_METHOD_SD_RAW;
+        }
+        printf("Wildbits raw failed, continuing fallback\n");
+    }
+
+    printf("Trying legacy names (.lz4 -> .gz -> .bin) from %s\n", fallback_path);
+    if (program_fpga_from_lz4_file(fallback_path)) {
         return FPGA_METHOD_SD_LZ4;
     }
-    if (program_fpga_from_gz_file(info->path)) {
+    if (program_fpga_from_gz_file(fallback_path)) {
         return FPGA_METHOD_SD_GZIP;
     }
-    if (program_fpga_from_file_path(info->path)) {
+    if (program_fpga_from_file_path(fallback_path)) {
         return FPGA_METHOD_SD_RAW;
     }
     if (info->flash_base > 0) {
@@ -620,30 +771,35 @@ bool fil_read_exact(FIL* fil, void* dst, UINT len)
 
 bool program_fpga_from_file(FIL fil)
 {
-    unsigned int i, j, k = 0;
+    UINT j = 0;
+    FRESULT fr = FR_OK;
 
     //multicore_launch_core1(f256k2_prg_block_fpga);    // Get the Second Core Going
 
     //printf("The Core1 is Started and the Code is: %X\n", MailBox);
     f256k2_init_prg_fpga();
-    do {
-        f_lseek(&fil, k);
-        (void)f_read(&fil, Buffer0, BUFFER_SIZE, &j);      // J = How many were read
-        k = k + j;  //
-        i = BUFFER_SIZE - j;
-        //printf("Block #: %d Byte Read: %d %d\n", BlockCount++, j);
+    for (;;) {
+        fr = f_read(&fil, Buffer0, BUFFER_SIZE, &j);      // J = how many were read
+        if (fr != FR_OK) {
+            return false;
+        }
+        if (j == 0) {
+            break;
+        }
+        //printf("Block #: %d Byte Read: %d\n", BlockCount++, j);
         f256k2_prg_block_fpga(Buffer0, j);
+        if (j < BUFFER_SIZE) {
+            break;
+        }
     }
-    while (i == 0);    // Process Blocks of 32K first
 
-    f256k2_prg_block_fpga(Buffer0, i);       // Last Block
     //gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
 #if USE_PIO_FPGA
     fpga_pio_begin();
     fpga_pio_enable(false);
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (k = 0; k < 100; k++){
+    for (unsigned int k = 0; k < 100; k++){
         gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
         gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }

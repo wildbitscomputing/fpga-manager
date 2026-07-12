@@ -98,6 +98,26 @@ if (PICOTOOL_EXECUTABLE AND Python3_Interpreter_FOUND)
         COMMENT "Building combined UF2 with FPGA LZ4 blobs"
     )
     add_custom_target(fpga_mgr_with_fpga_uf2 DEPENDS ${COMBINED_UF2})
+else()
+    set(_FPGA_UF2_MISSING "")
+    if (NOT PICOTOOL_EXECUTABLE)
+        string(APPEND _FPGA_UF2_MISSING " picotool")
+    endif()
+    if (NOT Python3_Interpreter_FOUND)
+        string(APPEND _FPGA_UF2_MISSING " Python3")
+    endif()
+
+    message(STATUS
+        "Skipping fpga_mgr_with_fpga_uf2 generation; missing prerequisites:${_FPGA_UF2_MISSING}")
+
+    add_custom_target(fpga_mgr_with_fpga_uf2
+        COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --red
+                "Cannot build fpga_mgr_with_fpga_uf2. Missing prerequisites:${_FPGA_UF2_MISSING}"
+        COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --yellow
+                "Install missing tools, then re-run cmake configure."
+        COMMAND ${CMAKE_COMMAND} -E false
+        VERBATIM
+    )
 endif()
 #pico_set_binary_type(fpga_mgr no_flash)
 pico_set_program_name(fpga_mgr "fpga_mgr")
