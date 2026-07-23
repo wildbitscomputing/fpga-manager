@@ -7,7 +7,8 @@
 
 #define BLOCK_SIZE 32768
 
-static int write_u32(FILE *f, uint32_t v) {
+static int write_u32(FILE* f, uint32_t v)
+{
     uint8_t b[4];
     b[0] = (uint8_t)(v & 0xff);
     b[1] = (uint8_t)((v >> 8) & 0xff);
@@ -16,28 +17,30 @@ static int write_u32(FILE *f, uint32_t v) {
     return fwrite(b, 1, 4, f) == 4 ? 0 : -1;
 }
 
-static int read_block(FILE *f, uint8_t *buf, size_t *out_len) {
+static int read_block(FILE* f, uint8_t* buf, size_t* out_len)
+{
     size_t n = fread(buf, 1, BLOCK_SIZE, f);
     *out_len = n;
     return ferror(f) ? -1 : 0;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv)
+{
     if (argc != 3) {
         fprintf(stderr, "usage: %s <input.bin> <output.lz4>\n", argv[0]);
         return 1;
     }
 
-    const char *in_path = argv[1];
-    const char *out_path = argv[2];
+    const char* in_path = argv[1];
+    const char* out_path = argv[2];
 
-    FILE *fin = fopen(in_path, "rb");
+    FILE* fin = fopen(in_path, "rb");
     if (!fin) {
         perror("open input");
         return 1;
     }
 
-    FILE *fout = fopen(out_path, "wb");
+    FILE* fout = fopen(out_path, "wb");
     if (!fout) {
         perror("open output");
         fclose(fin);
@@ -71,8 +74,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    uint8_t *in_buf = (uint8_t *)malloc(BLOCK_SIZE);
-    uint8_t *out_buf = (uint8_t *)malloc(LZ4_COMPRESSBOUND(BLOCK_SIZE));
+    uint8_t* in_buf = (uint8_t*)malloc(BLOCK_SIZE);
+    uint8_t* out_buf = (uint8_t*)malloc(LZ4_COMPRESSBOUND(BLOCK_SIZE));
     if (!in_buf || !out_buf) {
         fprintf(stderr, "alloc failed\n");
         free(in_buf);
@@ -96,7 +99,7 @@ int main(int argc, char **argv) {
             break;
         }
 
-        int comp_len = LZ4_compress_default((const char *)in_buf, (char *)out_buf,
+        int comp_len = LZ4_compress_default((const char*)in_buf, (char*)out_buf,
                                             (int)in_len, LZ4_COMPRESSBOUND(BLOCK_SIZE));
         if (comp_len <= 0) {
             fprintf(stderr, "compress failed\n");

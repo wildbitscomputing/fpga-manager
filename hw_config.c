@@ -1,14 +1,14 @@
 /* hw_config.c
 Copyright 2021 Carl John Kugler III
 
-Licensed under the Apache License, Version 2.0 (the License); you may not use 
-this file except in compliance with the License. You may obtain a copy of the 
+Licensed under the Apache License, Version 2.0 (the License); you may not use
+this file except in compliance with the License. You may obtain a copy of the
 License at
 
-   http://www.apache.org/licenses/LICENSE-2.0 
-Unless required by applicable law or agreed to in writing, software distributed 
-under the License is distributed on an AS IS BASIS, WITHOUT WARRANTIES OR 
-CONDITIONS OF ANY KIND, either express or implied. See the License for the 
+   http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an AS IS BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
 */
 /*
@@ -45,9 +45,9 @@ static spi_t spis[] = {  // One for each SPI.
         .miso_gpio = 20, // GPIO number (not pin number)
         .mosi_gpio = 19,
         .sck_gpio = 18,
-        //.baud_rate = 12500 * 1000,  
+        //.baud_rate = 12500 * 1000,
         .baud_rate = 50000000,
-        //.baud_rate = 25 * 1000 * 1000, // Actual frequency: 20833333. 
+        //.baud_rate = 25 * 1000 * 1000, // Actual frequency: 20833333.
     }
 };
 
@@ -61,11 +61,13 @@ static sd_card_t sd_cards[] = {  // One for each SD card
         .card_detect_gpio = 13,   // Card detect
         .card_detected_true = -1  // What the GPIO read returns when a card is
                                  // present. Use -1 if there is no card detect.
-    }};
+    }
+};
 
 /* ********************************************************************** */
 size_t sd_get_num() { return count_of(sd_cards); }
-sd_card_t *sd_get_by_num(size_t num) {
+sd_card_t* sd_get_by_num(size_t num)
+{
     if (num <= sd_get_num()) {
         return &sd_cards[num];
     } else {
@@ -73,7 +75,8 @@ sd_card_t *sd_get_by_num(size_t num) {
     }
 }
 size_t spi_get_num() { return count_of(spis); }
-spi_t *spi_get_by_num(size_t num) {
+spi_t* spi_get_by_num(size_t num)
+{
     if (num <= sd_get_num()) {
         return &spis[num];
     } else {
