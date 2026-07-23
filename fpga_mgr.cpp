@@ -1,22 +1,22 @@
-#include <stdio.h>
 #include <cstdint>
 #include <cstring>
+#include <stdio.h>
 //
 #include "f_util.h"
 #include "ff.h"
+#include "hardware/dma.h"
+#include "hardware/gpio.h"
+#include "hardware/pio.h"
+#include "hardware/structs/sio.h"
+#include "hardware/xosc.h"
 #include "pico/stdlib.h"
 #include "rtc.h"
-#include "hardware/gpio.h"
-#include "hardware/dma.h"
-#include "hardware/pio.h"
-#include "hardware/xosc.h"
-#include "hardware/structs/sio.h"
 //
-#include "hw_config.h"
-#include "hardware/clocks.h"
-#include "miniz.h"
-#include "lz4.h"
 #include "fpga_out.pio.h"
+#include "hardware/clocks.h"
+#include "hw_config.h"
+#include "lz4.h"
+#include "miniz.h"
 
 // Set to 0 to use legacy GPIO bit-bang path for FPGA programming.
 #ifndef USE_PIO_FPGA
@@ -28,58 +28,58 @@
 #endif
 
 // datasheet for information on which other pins can be used.
-#define UART_ID uart1
-#define BAUD_RATE 115200
-#define DATA_BITS 8
-#define STOP_BITS 1
-#define PARITY    UART_PARITY_NONE
+#define UART_ID            uart1
+#define BAUD_RATE          115200
+#define DATA_BITS          8
+#define STOP_BITS          1
+#define PARITY             UART_PARITY_NONE
 
-#define UART_TX_PIN 24
-#define UART_RX_PIN 25
+#define UART_TX_PIN        24
+#define UART_RX_PIN        25
 
-#define SPI_SUPER_MISO_i    0   // SPI0
-#define SPI_SUPER_CSn_i     1   // SPI0
-#define SPI_SUPER_SCLK_i    2   // SPI0
-#define SPI_SUPER_MOSI_o    3   // SPI0
-#define FPGA_CONFIG_PRG     4   // Output - Pulse to begin Sequence
-#define FPGA_SYSTEM_RSTn    5   // Output
-#define FPGA_CONFIG_CCLK    6   // Output
-#define FPGA_CONFIG_INITn   7   // Input
+#define SPI_SUPER_MISO_i   0   // SPI0
+#define SPI_SUPER_CSn_i    1   // SPI0
+#define SPI_SUPER_SCLK_i   2   // SPI0
+#define SPI_SUPER_MOSI_o   3   // SPI0
+#define FPGA_CONFIG_PRG    4   // Output - Pulse to begin Sequence
+#define FPGA_SYSTEM_RSTn   5   // Output
+#define FPGA_CONFIG_CCLK   6   // Output
+#define FPGA_CONFIG_INITn  7   // Input
 // Output
-#define FPGA_BUS_D0         8
-#define FPGA_BUS_D1         9
-#define FPGA_BUS_D2         10
-#define FPGA_BUS_D3         11
-#define FPGA_BUS_D4         12
-#define FPGA_BUS_D5         13
-#define FPGA_BUS_D6         14
-#define FPGA_BUS_D7         15
+#define FPGA_BUS_D0        8
+#define FPGA_BUS_D1        9
+#define FPGA_BUS_D2        10
+#define FPGA_BUS_D3        11
+#define FPGA_BUS_D4        12
+#define FPGA_BUS_D5        13
+#define FPGA_BUS_D6        14
+#define FPGA_BUS_D7        15
 // Input
-#define F256K2_CONTEXT_SW0  16
-#define F256K2_CONTEXT_SW1  17
-#define SPI_SD_SD1          21  // Not used now
-#define SPI_SD_SD2          22  // Not used Now
+#define F256K2_CONTEXT_SW0 16
+#define F256K2_CONTEXT_SW1 17
+#define SPI_SD_SD1         21  // Not used now
+#define SPI_SD_SD2         22  // Not used Now
 
 // UART Definition
-#define COM_TX_PIN          24  // UART1
-#define COM_RX_PIN          25  // UART1
-#define ADC0                26
-#define ADC1                27
-#define ADC2                28
-#define ADC3                29
+#define COM_TX_PIN         24  // UART1
+#define COM_RX_PIN         25  // UART1
+#define ADC0               26
+#define ADC1               27
+#define ADC2               28
+#define ADC3               29
 
-#define FPGA_SIZE           9730652
-#define BUFFER_SIZE         32768
-#define GZ_IN_BUF_SIZE      2048
-#define LZ4_COMP_BUF_SIZE   LZ4_COMPRESSBOUND(BUFFER_SIZE)
-#define FPGA_DATA_MASK      0x0000FF00u
-#define FPGA_CCLK_MASK      (1u << FPGA_CONFIG_CCLK)
+#define FPGA_SIZE          9730652
+#define BUFFER_SIZE        32768
+#define GZ_IN_BUF_SIZE     2048
+#define LZ4_COMP_BUF_SIZE  LZ4_COMPRESSBOUND(BUFFER_SIZE)
+#define FPGA_DATA_MASK     0x0000FF00u
+#define FPGA_CCLK_MASK     (1u << FPGA_CONFIG_CCLK)
 
 // Prototpyes
 void f256k2_context_man_init_io(void);
 static inline void f256k2_Set_FPGA_Data_Port(unsigned char Value);
 void f256k2_init_prg_fpga(void);
-void f256k2_prg_block_fpga(const uint8_t *ptr, unsigned int len);
+void f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len);
 bool program_fpga_from_file(FIL fil);
 bool program_fpga_from_lz4_file(const char* path);
 bool program_fpga_from_gz_file(const char* path);
@@ -204,7 +204,7 @@ typedef struct {
 static const fpga_image_info_t fpga_images[] = {
     { "CNTX1", "CFP95600C.bin", FOENIX_FLASH_LZ4_BASE0 },
     { "CNTX2", "CFP95616E.bin", FOENIX_FLASH_LZ4_BASE1 },
-    { "CNTX3", "f256k2t9.bin",  FOENIX_FLASH_LZ4_BASE2 },
+    { "CNTX3", "f256k2t9.bin", FOENIX_FLASH_LZ4_BASE2 },
     { "CNTX4", "foenix138.bin", FOENIX_FLASH_LZ4_BASE3 },
 };
 
@@ -318,9 +318,10 @@ static bool find_wildbits_image(const char* dir, const char* suffix, char* out_p
 // See FatFs - Generic FAT Filesystem Module, "Application Interface",
     // http://elm-chan.org/fsw/ff/00index_e.html
 
-int main() {
-    sd_card_t *pSD = sd_get_by_num(0);
-    //set_sys_clock_khz(266000, true);
+int main()
+{
+    sd_card_t* pSD = sd_get_by_num(0);
+    // set_sys_clock_khz(266000, true);
     stdio_init_all();
     xosc_init(); // #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
     time_init();
@@ -338,12 +339,12 @@ int main() {
     FRESULT fr;
     fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
     if (FR_OK != fr) {
-      method = program_fpga_from_flash_slot(dip_switches);
-      if (method == FPGA_METHOD_NONE) {
-        panic("Programming from flash failed\n");
-      }
+        method = program_fpga_from_flash_slot(dip_switches);
+        if (method == FPGA_METHOD_NONE) {
+            panic("Programming from flash failed\n");
+        }
     } else {
-      method = program_fpga_from_choice(dip_switches);
+        method = program_fpga_from_choice(dip_switches);
     }
 
     // measure fpga programming
@@ -359,7 +360,7 @@ int main() {
     set_sys_clock_khz(133000, true); // 328us
 
     for (;;)
-      ;
+        ;
 }
 
 bool program_fpga_from_lz4_file(const char* path)
@@ -432,7 +433,7 @@ bool program_fpga_from_lz4_file_path(const char* lz4_path)
     fpga_pio_enable(false);
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (unsigned int k = 0; k < 100; k++){
+    for (unsigned int k = 0; k < 100; k++) {
         gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
         gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }
@@ -491,7 +492,7 @@ bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
     fpga_pio_enable(false);
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (unsigned int k = 0; k < 100; k++){
+    for (unsigned int k = 0; k < 100; k++) {
         gpio_put(FPGA_CONFIG_CCLK, 0);
         gpio_put(FPGA_CONFIG_CCLK, 1);
     }
@@ -577,7 +578,7 @@ bool program_fpga_from_gz_file_path(const char* gz_path)
             fpga_pio_enable(false);
 #endif
             gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-            for (unsigned int k = 0; k < 100; k++){
+            for (unsigned int k = 0; k < 100; k++) {
                 gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
                 gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
             }
@@ -734,7 +735,8 @@ bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos)
             if (!read_byte(&c)) {
                 return false;
             }
-        } while (c != 0);
+        }
+        while (c != 0);
     }
     if (flg & 0x10) {
         uint8_t c = 0;
@@ -742,7 +744,8 @@ bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos)
             if (!read_byte(&c)) {
                 return false;
             }
-        } while (c != 0);
+        }
+        while (c != 0);
     }
     if (flg & 0x02) {
         uint8_t tmp = 0;
@@ -774,9 +777,9 @@ bool program_fpga_from_file(FIL fil)
     UINT j = 0;
     FRESULT fr = FR_OK;
 
-    //multicore_launch_core1(f256k2_prg_block_fpga);    // Get the Second Core Going
+    // multicore_launch_core1(f256k2_prg_block_fpga);    // Get the Second Core Going
 
-    //printf("The Core1 is Started and the Code is: %X\n", MailBox);
+    // printf("The Core1 is Started and the Code is: %X\n", MailBox);
     f256k2_init_prg_fpga();
     for (;;) {
         fr = f_read(&fil, Buffer0, BUFFER_SIZE, &j);      // J = how many were read
@@ -786,20 +789,20 @@ bool program_fpga_from_file(FIL fil)
         if (j == 0) {
             break;
         }
-        //printf("Block #: %d Byte Read: %d\n", BlockCount++, j);
+        // printf("Block #: %d Byte Read: %d\n", BlockCount++, j);
         f256k2_prg_block_fpga(Buffer0, j);
         if (j < BUFFER_SIZE) {
             break;
         }
     }
 
-    //gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
+    // gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
 #if USE_PIO_FPGA
     fpga_pio_begin();
     fpga_pio_enable(false);
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (unsigned int k = 0; k < 100; k++){
+    for (unsigned int k = 0; k < 100; k++) {
         gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
         gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
     }
@@ -813,11 +816,11 @@ void f256k2_context_man_init_io(void)
 {
     // GPIO Init
     gpio_init(FPGA_CONFIG_PRG);     // Output - Pulse to begin Sequence
-    //gpio_init(FPGA_CONFIG_DONE);    // Input
+    // gpio_init(FPGA_CONFIG_DONE);    // Input
     gpio_init(FPGA_CONFIG_CCLK);    // Output
     gpio_init(FPGA_CONFIG_INITn);   // Input
     gpio_init(FPGA_SYSTEM_RSTn);   // I/O
-    //gpio_init(FPGA_CONFIG_CSn);     // Output
+    // gpio_init(FPGA_CONFIG_CSn);     // Output
 
     gpio_init(FPGA_BUS_D0);         // Output
     gpio_init(FPGA_BUS_D1);         // Output
@@ -835,11 +838,11 @@ void f256k2_context_man_init_io(void)
     gpio_init(F256K2_CONTEXT_SW1);  // Input
     // GPIOs Direction
     gpio_set_dir(FPGA_CONFIG_PRG, GPIO_OUT);
-    //gpio_set_dir(FPGA_CONFIG_DONE, GPIO_IN);
+    // gpio_set_dir(FPGA_CONFIG_DONE, GPIO_IN);
     gpio_set_dir(FPGA_CONFIG_CCLK, GPIO_OUT);
     gpio_set_dir(FPGA_CONFIG_INITn, GPIO_IN);
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
-    //gpio_set_dir(FPGA_CONFIG_CSn, GPIO_OUT);
+    // gpio_set_dir(FPGA_CONFIG_CSn, GPIO_OUT);
 
     gpio_set_dir(SPI_SD_SD1, GPIO_OUT);
     gpio_set_dir(SPI_SD_SD2, GPIO_OUT);
@@ -863,7 +866,7 @@ void f256k2_context_man_init_io(void)
     gpio_put(SPI_SD_SD1, 1);
     gpio_put(SPI_SD_SD2, 1);
 
-    //gpio_put(FPGA_CONFIG_CSn, 1);
+    // gpio_put(FPGA_CONFIG_CSn, 1);
 
     //    gpio_pull_up(xxxx); // Just in Case I might need this
 }
@@ -901,10 +904,10 @@ void f256k2_init_prg_fpga(void)
     printf("Initn is Hi\n");
     gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
     gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
-    //gpio_put(FPGA_CONFIG_CSn, 0);          // Bring Down the ChipSelect
+    // gpio_put(FPGA_CONFIG_CSn, 0);          // Bring Down the ChipSelect
 }
 
-void f256k2_prg_block_fpga(const uint8_t *ptr, unsigned int len)
+void f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len)
 {
     // printf("Programming chunk %d bytes\n", len);
     if (!ptr || len == 0) {
