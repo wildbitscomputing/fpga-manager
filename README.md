@@ -1,4 +1,4 @@
-# fpga_mgr
+# fpga-manager
 
 RP2040 (Raspberry Pi Pico) firmware that programs a Wildbits/Foenix FPGA from
 an SD card, with an optional fallback to preloaded LZ4 images stored in flash.
@@ -14,8 +14,8 @@ an SD card, with an optional fallback to preloaded LZ4 images stored in flash.
 
 ## SD card layout
 
-The context DIP switch determines which of the following directories is selected
-as a base path:
+The SD card must be formatted as a single FAT16 or FAT32 volume. The context DIP
+switch determines which of the following directories is selected as a base path:
 
 - `CNTX1/`
 - `CNTX2/`
