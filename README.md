@@ -60,6 +60,8 @@ Prerequisites:
 - CMake + a build tool (Ninja or Make)
 - Python 3 (optional, used for UF2 concatenation)
 - `picotool` (optional, for combined UF2 with FPGA blobs)
+- [`just` command runner](https://github.com/casey/just) (optional, for simpler
+  command-line builds)
 
 Example build:
 
@@ -68,6 +70,12 @@ mkdir -p build
 cd build
 cmake ..
 cmake --build .
+```
+
+or simply
+
+```sh
+just build
 ```
 
 Artifacts (in `build/`):
@@ -84,6 +92,12 @@ the firmware UF2 with the LZ4 images from `fpga/` into one UF2:
 
 ```sh
 cmake --build . --target fpga_mgr_with_fpga_uf2
+```
+
+or
+
+```sh
+just build-with-fpga-load
 ```
 
 ## Tools
