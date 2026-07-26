@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <stdio.h>
@@ -75,7 +76,7 @@
 #define FPGA_DATA_MASK     0x0000FF00u
 #define FPGA_CCLK_MASK     (1u << FPGA_CONFIG_CCLK)
 
-// Prototpyes
+// Prototypes
 void f256k2_context_man_init_io(void);
 static inline void f256k2_Set_FPGA_Data_Port(unsigned char Value);
 void f256k2_init_prg_fpga(void);
@@ -86,6 +87,27 @@ bool program_fpga_from_gz_file(const char* path);
 bool program_fpga_from_file_path(const char* path);
 bool program_fpga_from_lz4_file_path(const char* lz4_path);
 bool program_fpga_from_gz_file_path(const char* gz_path);
+
+// External FPGA LZ4 blobs are stored in flash at fixed addresses.
+#define FPGA_FLASH_LZ4_BASE0 0x10800000u
+#define FPGA_FLASH_LZ4_BASE1 0x10A00000u
+#define FPGA_FLASH_LZ4_BASE2 0x10C00000u
+#define FPGA_FLASH_LZ4_BASE3 0x10E00000u
+#define FPGA_FLASH_SLOT_SIZE (2 * 1024 * 1024u)
+
+typedef struct {
+    const char* base_path;
+    const char* fallback_filename;
+    uint32_t flash_base;
+} fpga_image_info_t;
+
+static const fpga_image_info_t fpga_images[] = {
+    { "CNTX1", "CFP95600C.bin", FPGA_FLASH_LZ4_BASE0 },
+    { "CNTX2", "CFP95616E.bin", FPGA_FLASH_LZ4_BASE1 },
+    { "CNTX3", "f256k2t9.bin", FPGA_FLASH_LZ4_BASE2 },
+    { "CNTX4", "foenix138.bin", FPGA_FLASH_LZ4_BASE3 },
+};
+
 typedef enum {
     FPGA_METHOD_NONE = 0,
     FPGA_METHOD_SD_LZ4,
@@ -95,7 +117,7 @@ typedef enum {
     FPGA_METHOD_FLASH_GZIP,
 } fpga_method_t;
 
-static const char* const fpga_method_names[] = {
+static std::array fpga_method_names {
     "none",
     "SD LZ4",
     "SD gzip",
@@ -104,9 +126,12 @@ static const char* const fpga_method_names[] = {
     "FLASH gzip",
 };
 
-fpga_method_t program_fpga_from_choice(unsigned char sw_choice);
+static_assert(FPGA_METHOD_FLASH_GZIP == fpga_method_names.size() - 1);
+
+fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info);
+fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_t slot);
+
 bool program_fpga_from_lz4_data(const uint8_t* data, size_t len);
-fpga_method_t program_fpga_from_flash_slot(unsigned char sw_choice);
 bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos);
 bool fil_read_exact(FIL* fil, void* dst, UINT len);
 
@@ -187,26 +212,6 @@ static void fpga_pio_enable(bool enable)
     pio_sm_set_enabled(fpga_pio, fpga_sm, enable);
 }
 #endif
-
-// External FPGA LZ4 blobs are stored in flash at fixed addresses.
-#define FOENIX_FLASH_LZ4_BASE0 0x10800000u
-#define FOENIX_FLASH_LZ4_BASE1 0x10A00000u
-#define FOENIX_FLASH_LZ4_BASE2 0x10C00000u
-#define FOENIX_FLASH_LZ4_BASE3 0x10E00000u
-#define FOENIX_FLASH_SLOT_SIZE (2 * 1024 * 1024u)
-
-typedef struct {
-    const char* base_path;
-    const char* fallback_filename;
-    uint32_t flash_base;
-} fpga_image_info_t;
-
-static const fpga_image_info_t fpga_images[] = {
-    { "CNTX1", "CFP95600C.bin", FOENIX_FLASH_LZ4_BASE0 },
-    { "CNTX2", "CFP95616E.bin", FOENIX_FLASH_LZ4_BASE1 },
-    { "CNTX3", "f256k2t9.bin", FOENIX_FLASH_LZ4_BASE2 },
-    { "CNTX4", "foenix138.bin", FOENIX_FLASH_LZ4_BASE3 },
-};
 
 static char ascii_tolower(char c)
 {
@@ -316,47 +321,72 @@ static bool find_wildbits_image(const char* dir, const char* suffix, char* out_p
 }
 
 // See FatFs - Generic FAT Filesystem Module, "Application Interface",
-    // http://elm-chan.org/fsw/ff/00index_e.html
+// http://elm-chan.org/fsw/ff/00index_e.html
 
 int main()
 {
-    sd_card_t* pSD = sd_get_by_num(0);
     // set_sys_clock_khz(266000, true);
     stdio_init_all();
     xosc_init(); // #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
     time_init();
-    // stdio_uart_init_full (uart1, BAUD_RATE, UART_TX_PIN, -1);       // Setup STDIO to Terminal UART (to be removed later)
+
+    // stdio_uart_init_full(uart1, BAUD_RATE, UART_TX_PIN, -1);       // Setup STDIO to Terminal UART (to be removed later)
 
     f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
 
+    // start timing
     absolute_time_t start = get_absolute_time();
 
-    uint8_t dip_switches = ((gpio_get_all() & 0x00030000) >> 16) & 0x03;    // Read the 2 bits from DipSwitch to know which Load with need to get in there!
+    // read the DIP switches to select the FPGA context to program
+    uint8_t dip_switches = ((gpio_get_all() & 0x00030000) >> 16) & 0x03;
 
-    fpga_method_t method;
-
-    // Let's Mount the SDCard First
-    FRESULT fr;
-    fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
-    if (FR_OK != fr) {
-        method = program_fpga_from_flash_slot(dip_switches);
-        if (method == FPGA_METHOD_NONE) {
-            panic("Programming from flash failed\n");
-        }
-    } else {
-        method = program_fpga_from_choice(dip_switches);
+    if (dip_switches >= std::size(fpga_images)) {
+        panic("Slot index %u is out of range\n", dip_switches);
     }
 
-    // measure fpga programming
+    printf("Selected slot index (0-3): %u\n", dip_switches);
+
+    const fpga_image_info_t* info = &fpga_images[dip_switches];
+    fpga_method_t method = FPGA_METHOD_NONE;
+
+    // mount the SD card
+    sd_card_t* pSD = sd_get_by_num(0);
+    if (!pSD) {
+        panic("Invalid hardware config, see 'hw_config.c' implementation\n");
+    }
+
+    FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
+
+    if (fr != FR_OK) {
+        printf("SD card not found, attempting to program from flash\n");
+        method = program_fpga_from_flash_slot(info, dip_switches);
+    } else {
+        method = program_fpga_from_sd_card(info);
+        if (method == FPGA_METHOD_NONE) {
+            printf("No matching image found, attempting to program from flash slot\n");
+            method = program_fpga_from_flash_slot(info, dip_switches);
+        }
+    }
+
+    f_unmount(pSD->pcName);
+
+    if (method == FPGA_METHOD_NONE) {
+        panic("Programming failed\n");
+    }
+
+    // measure programming time
     int64_t fpga_us = absolute_time_diff_us(start, get_absolute_time());
 
     printf("=== Wildbits FPGA Loader ===\n");
+    if (method <= FPGA_METHOD_SD_RAW)
+        printf("Context  : %s\n", info->base_path);
+    else
+        printf("Slot     : %d\n", dip_switches);
+
     printf("Method   : %s\n", fpga_method_names[method]);
     printf("Time     : %lldms\n", fpga_us / 1000);
-    printf("Core Slot: %d\n", dip_switches);
     printf("============================\n");
 
-    f_unmount(pSD->pcName);
     set_sys_clock_khz(133000, true); // 328us
 
     for (;;)
@@ -452,7 +482,11 @@ bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
                           ((uint32_t)data[1] << 8) |
                           ((uint32_t)data[2] << 16) |
                           ((uint32_t)data[3] << 24);
-    (void)total_size;
+
+    if (total_size == 0xffffffff) {
+        printf("Flash lz4 data not found\n");
+        return false;
+    }
 
     size_t off = 4;
     f256k2_init_prg_fpga();
@@ -471,17 +505,17 @@ bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
             break;
         }
         if (out_len > BUFFER_SIZE || in_len > LZ4_COMP_BUF_SIZE) {
-            printf("flash lz4 block too large\n");
+            printf("Flash lz4 block too large\n");
             return false;
         }
         if (off + in_len > len) {
-            printf("flash lz4 truncated\n");
+            printf("Flash lz4 truncated\n");
             return false;
         }
         int dec = LZ4_decompress_safe((const char*)(data + off), (char*)Buffer0,
                                       (int)in_len, (int)out_len);
         if (dec < 0 || (uint32_t)dec != out_len) {
-            printf("flash lz4 decompress failed\n");
+            printf("Flash lz4 decompress failed\n");
             return false;
         }
         f256k2_prg_block_fpga(Buffer0, (unsigned int)out_len);
@@ -615,9 +649,8 @@ bool program_fpga_from_file_path(const char* path)
     return ok;
 }
 
-fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
+fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info)
 {
-    const fpga_image_info_t* info = &fpga_images[sw_choice & 0x03];
     char fallback_path[256];
     char wildbits_path[256];
     int written = snprintf(fallback_path, sizeof(fallback_path), "%s/%s",
@@ -627,9 +660,9 @@ fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
         return FPGA_METHOD_NONE;
     }
 
-    printf("FPGA slot %u base path: %s, fallback file: %s\n",
-           (unsigned)(sw_choice & 0x03), info->base_path, info->fallback_filename);
+    printf("FPGA image base path: %s, fallback file: %s\n", info->base_path, info->fallback_filename);
     printf("Searching %s for Wildbits*.{lz4,gz,bin}\n", info->base_path);
+
     if (find_wildbits_image(info->base_path, ".lz4", wildbits_path, sizeof(wildbits_path))) {
         printf("Selected Wildbits LZ4 image: %s\n", wildbits_path);
         if (program_fpga_from_lz4_file_path(wildbits_path)) {
@@ -637,6 +670,7 @@ fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
         }
         printf("Wildbits LZ4 failed, continuing fallback\n");
     }
+
     if (find_wildbits_image(info->base_path, ".gz", wildbits_path, sizeof(wildbits_path))) {
         printf("Selected Wildbits gzip image: %s\n", wildbits_path);
         if (program_fpga_from_gz_file_path(wildbits_path)) {
@@ -644,6 +678,7 @@ fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
         }
         printf("Wildbits gzip failed, continuing fallback\n");
     }
+
     if (find_wildbits_image(info->base_path, ".bin", wildbits_path, sizeof(wildbits_path))) {
         printf("Selected Wildbits raw image: %s\n", wildbits_path);
         if (program_fpga_from_file_path(wildbits_path)) {
@@ -656,33 +691,28 @@ fpga_method_t program_fpga_from_choice(unsigned char sw_choice)
     if (program_fpga_from_lz4_file(fallback_path)) {
         return FPGA_METHOD_SD_LZ4;
     }
+
     if (program_fpga_from_gz_file(fallback_path)) {
         return FPGA_METHOD_SD_GZIP;
     }
+
     if (program_fpga_from_file_path(fallback_path)) {
         return FPGA_METHOD_SD_RAW;
     }
-    if (info->flash_base > 0) {
-        printf("Programming from flash (lz4 slot %u)\n", (unsigned)(sw_choice & 0x03));
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
-        if (program_fpga_from_lz4_data(data, FOENIX_FLASH_SLOT_SIZE)) {
-            return FPGA_METHOD_FLASH_LZ4;
-        }
-    }
-    printf("File Not Found!\n");
+
     return FPGA_METHOD_NONE;
 }
 
-fpga_method_t program_fpga_from_flash_slot(unsigned char sw_choice)
+fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_t slot)
 {
-    const fpga_image_info_t* info = &fpga_images[sw_choice & 0x03];
     if (info->flash_base == 0u) {
+        printf("No flash address specified for slot %u\n", (unsigned)(slot));
         return FPGA_METHOD_NONE;
     }
 
-    printf("Programming from flash (lz4 slot %u)\n", (unsigned)(sw_choice & 0x03));
+    printf("Programming from flash (lz4 slot %u)\n", (unsigned)(slot));
     const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
-    if (program_fpga_from_lz4_data(data, FOENIX_FLASH_SLOT_SIZE)) {
+    if (program_fpga_from_lz4_data(data, FPGA_FLASH_SLOT_SIZE)) {
         return FPGA_METHOD_FLASH_LZ4;
     }
     return FPGA_METHOD_NONE;
@@ -889,22 +919,22 @@ void f256k2_init_prg_fpga(void)
     gpio_put(FPGA_CONFIG_PRG, 0);
     printf("Programn is Low\n");
     do {
-        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 0);          // Bring Down the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 1);          // Bring Up the Clock
     }
-    while (gpio_get(FPGA_CONFIG_INITn));       // Wait Till it gets down
+    while (gpio_get(FPGA_CONFIG_INITn));        // Wait Till it gets down
     printf("Initn is Low\n");
     gpio_put(FPGA_CONFIG_PRG, 1);
     printf("Programn is High\n");
     do {
-        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 0);          // Bring Down the Clock
+        gpio_put(FPGA_CONFIG_CCLK, 1);          // Bring Up the Clock
     }
-    while (gpio_get(FPGA_CONFIG_INITn) == 0);       // Wait Till it gets up
+    while (gpio_get(FPGA_CONFIG_INITn) == 0);   // Wait Till it gets up
     printf("Initn is Hi\n");
-    gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-    gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
-    // gpio_put(FPGA_CONFIG_CSn, 0);          // Bring Down the ChipSelect
+    gpio_put(FPGA_CONFIG_CCLK, 0);              // Bring Down the Clock
+    gpio_put(FPGA_CONFIG_CCLK, 1);              // Bring Up the Clock
+    // gpio_put(FPGA_CONFIG_CSn, 0);               // Bring Down the ChipSelect
 }
 
 void f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len)
