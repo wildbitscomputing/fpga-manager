@@ -13,4 +13,3 @@ BreakBeforeBraces: Custom
 BraceWrapping:
   AfterFunction: true
   BeforeWhile: true
-IndentPPDirectives: Leave
