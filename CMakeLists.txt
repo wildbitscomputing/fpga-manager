@@ -47,6 +47,29 @@ add_executable(fpga_mgr
     lz4.c
 )
 
+# Enable stricter-than-default compile-time warnings and checks
+target_compile_options(fpga_mgr PRIVATE
+    -Wall
+    -Wextra
+    -Wformat=2
+    -Werror=format
+    -Wno-unused-function
+)
+
+# Disable select warnings on third-party code
+get_target_property(FATFS_SPI_SOURCES FatFs_SPI INTERFACE_SOURCES)
+set_property(
+    SOURCE ${FATFS_SPI_SOURCES}
+    APPEND PROPERTY COMPILE_OPTIONS
+        -Wno-unused-variable
+)
+
+set_property(
+    SOURCE miniz.c
+    APPEND PROPERTY COMPILE_OPTIONS
+        -Wno-type-limits
+)
+
 # Generate PIO header for FPGA data+clock output.
 pico_generate_pio_header(fpga_mgr ${CMAKE_CURRENT_LIST_DIR}/fpga_out.pio)
 
