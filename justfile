@@ -8,7 +8,7 @@ set default-list
 [working-directory('build')]
 @build-target target: prepare
     cd build
-    cmake ..
+    cmake .. -DCMAKE_BUILD_TYPE=Release
     cmake --build . --target {{target}}
 
 @build: (build-target "fpga_mgr")
