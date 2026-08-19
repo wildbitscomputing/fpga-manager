@@ -13,8 +13,9 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 set(PICO_BOARD pico CACHE STRING "Board type")
-# Reserve top 8MB for external FPGA blobs (app uses first 8MB).
-set(PICO_FLASH_SIZE_BYTES 8388608 CACHE STRING "Flash size for application")
+# The application occupies the low part of a 16 MiB device. The upper 8 MiB
+# contains four fixed 2 MiB FPGA image slots.
+set(PICO_FLASH_SIZE_BYTES 16777216 CACHE STRING "Physical flash size")
 
 # Generated Cmake Pico project file
 
@@ -35,6 +36,27 @@ project(fpga_mgr C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+# Golden images are linked into the manager below the mutable 8 MiB slot bank.
+# Context 2 has no core yet, so recovery for it deliberately uses context 1.
+set(GOLDEN_CONTEXT1 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.lz4 CACHE FILEPATH "Golden context 1 image")
+set(GOLDEN_CONTEXT3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.lz4 CACHE FILEPATH "Golden context 3 image")
+set(GOLDEN_CONTEXT4 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.lz4 CACHE FILEPATH "Golden context 4 image")
+foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
+    if(NOT EXISTS "${${GOLDEN_IMAGE}}")
+        message(FATAL_ERROR "Missing required recovery image: ${${GOLDEN_IMAGE}}")
+    endif()
+    file(TO_CMAKE_PATH "${${GOLDEN_IMAGE}}" ${GOLDEN_IMAGE})
+endforeach()
+configure_file(golden_images.S.in ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S @ONLY)
+set(GOLDEN_FPGA_TOTAL_SIZE 0)
+foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
+    file(SIZE "${${GOLDEN_IMAGE}}" GOLDEN_IMAGE_SIZE)
+    math(EXPR GOLDEN_FPGA_TOTAL_SIZE "${GOLDEN_FPGA_TOTAL_SIZE} + ${GOLDEN_IMAGE_SIZE}")
+endforeach()
+if(GOLDEN_FPGA_TOTAL_SIZE GREATER 6291456)
+    message(FATAL_ERROR "Golden images total ${GOLDEN_FPGA_TOTAL_SIZE} bytes; maximum is 6 MiB")
+endif()
+
 add_subdirectory(FatFs_SPI build)
 
 # Add executable. Default name is the project name, version 0.1
@@ -45,6 +67,8 @@ add_executable(fpga_mgr
     miniz_tinfl.c
     miniz_tdef.c
     lz4.c
+    supervisor_service.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S
 )
 
 # Enable stricter-than-default compile-time warnings and checks
@@ -72,12 +96,16 @@ set_property(
 
 # Generate PIO header for FPGA data+clock output.
 pico_generate_pio_header(fpga_mgr ${CMAKE_CURRENT_LIST_DIR}/fpga_out.pio)
+pico_generate_pio_header(fpga_mgr ${CMAKE_CURRENT_LIST_DIR}/supervisor_spi.pio)
 
 # Add the standard library and FatFS/SPI to the build
 target_link_libraries(fpga_mgr
     pico_stdlib
     hardware_dma
     hardware_pio
+    hardware_adc
+    hardware_flash
+    hardware_watchdog
     FatFs_SPI
 )
 
@@ -97,9 +125,9 @@ if (NOT EXISTS ${PICOTOOL_EXECUTABLE})
     find_program(PICOTOOL_EXECUTABLE picotool)
 endif()
 
-set(FPGA_LZ4_0 ${CMAKE_CURRENT_LIST_DIR}/fpga/CFP95600C.bin.lz4)
-set(FPGA_LZ4_2 ${CMAKE_CURRENT_LIST_DIR}/fpga/f256k2t9.bin.lz4)
-set(FPGA_LZ4_3 ${CMAKE_CURRENT_LIST_DIR}/fpga/foenix138.bin.lz4)
+set(FPGA_LZ4_0 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.lz4)
+set(FPGA_LZ4_2 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.lz4)
+set(FPGA_LZ4_3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.lz4)
 set(FPGA_UF2_0 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot0.uf2)
 set(FPGA_UF2_2 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot2.uf2)
 set(FPGA_UF2_3 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot3.uf2)

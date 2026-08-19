@@ -1,0 +1,22 @@
+.section .rodata.golden_fpga, "a", %progbits
+.balign 4
+
+.global golden_fpga_context1_start
+golden_fpga_context1_start:
+.incbin "@GOLDEN_CONTEXT1@"
+.global golden_fpga_context1_end
+golden_fpga_context1_end:
+
+.balign 4
+.global golden_fpga_context3_start
+golden_fpga_context3_start:
+.incbin "@GOLDEN_CONTEXT3@"
+.global golden_fpga_context3_end
+golden_fpga_context3_end:
+
+.balign 4
+.global golden_fpga_context4_start
+golden_fpga_context4_start:
+.incbin "@GOLDEN_CONTEXT4@"
+.global golden_fpga_context4_end
+golden_fpga_context4_end:

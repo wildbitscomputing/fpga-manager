@@ -9,6 +9,7 @@
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
 #include "hardware/structs/sio.h"
+#include "hardware/watchdog.h"
 #include "hardware/xosc.h"
 #include "pico/stdlib.h"
 #include "rtc.h"
@@ -18,6 +19,7 @@
 #include "hw_config.h"
 #include "lz4.h"
 #include "miniz.h"
+#include "supervisor_service.h"
 
 // Set to 0 to use legacy GPIO bit-bang path for FPGA programming.
 #ifndef USE_PIO_FPGA
@@ -29,52 +31,55 @@
 #endif
 
 // datasheet for information on which other pins can be used.
-#define UART_ID            uart1
-#define BAUD_RATE          115200
-#define DATA_BITS          8
-#define STOP_BITS          1
-#define PARITY             UART_PARITY_NONE
+#define UART_ID              uart1
+#define BAUD_RATE            115200
+#define DATA_BITS            8
+#define STOP_BITS            1
+#define PARITY               UART_PARITY_NONE
 
-#define UART_TX_PIN        24
-#define UART_RX_PIN        25
+#define UART_TX_PIN          24
+#define UART_RX_PIN          25
 
-#define SPI_SUPER_MISO_i   0   // SPI0
-#define SPI_SUPER_CSn_i    1   // SPI0
-#define SPI_SUPER_SCLK_i   2   // SPI0
-#define SPI_SUPER_MOSI_o   3   // SPI0
-#define FPGA_CONFIG_PRG    4   // Output - Pulse to begin Sequence
-#define FPGA_SYSTEM_RSTn   5   // Output
-#define FPGA_CONFIG_CCLK   6   // Output
-#define FPGA_CONFIG_INITn  7   // Input
+#define SPI_SUPER_MISO_i     0   // SPI0
+#define SPI_SUPER_CSn_i      1   // SPI0
+#define SPI_SUPER_SCLK_i     2   // SPI0
+#define SPI_SUPER_MOSI_o     3   // SPI0
+#define FPGA_CONFIG_PRG      4   // Output - Pulse to begin Sequence
+#define FPGA_SYSTEM_RSTn     5   // Output
+#define FPGA_CONFIG_CCLK     6   // Output
+#define FPGA_CONFIG_INITn    7   // Input
 // Output
-#define FPGA_BUS_D0        8
-#define FPGA_BUS_D1        9
-#define FPGA_BUS_D2        10
-#define FPGA_BUS_D3        11
-#define FPGA_BUS_D4        12
-#define FPGA_BUS_D5        13
-#define FPGA_BUS_D6        14
-#define FPGA_BUS_D7        15
+#define FPGA_BUS_D0          8
+#define FPGA_BUS_D1          9
+#define FPGA_BUS_D2          10
+#define FPGA_BUS_D3          11
+#define FPGA_BUS_D4          12
+#define FPGA_BUS_D5          13
+#define FPGA_BUS_D6          14
+#define FPGA_BUS_D7          15
 // Input
-#define F256K2_CONTEXT_SW0 16
-#define F256K2_CONTEXT_SW1 17
-#define SPI_SD_SD1         21  // Not used now
-#define SPI_SD_SD2         22  // Not used Now
+#define F256K2_CONTEXT_SW0   16
+#define F256K2_CONTEXT_SW1   17
+#define SPI_SD_SD1           21  // Not used now
+#define SPI_SD_SD2           22  // Not used Now
 
 // UART Definition
-#define COM_TX_PIN         24  // UART1
-#define COM_RX_PIN         25  // UART1
-#define ADC0               26
-#define ADC1               27
-#define ADC2               28
-#define ADC3               29
+#define COM_TX_PIN           24  // UART1
+#define COM_RX_PIN           25  // UART1
+#define ADC0                 26
+#define ADC1                 27
+#define ADC2                 28
+#define ADC3                 29
 
-#define FPGA_SIZE          9730652
-#define BUFFER_SIZE        32768
-#define GZ_IN_BUF_SIZE     2048
-#define LZ4_COMP_BUF_SIZE  LZ4_COMPRESSBOUND(BUFFER_SIZE)
-#define FPGA_DATA_MASK     0x0000FF00u
-#define FPGA_CCLK_MASK     (1u << FPGA_CONFIG_CCLK)
+#define FPGA_SIZE            9730652
+#define BUFFER_SIZE          32768
+#define GZ_IN_BUF_SIZE       2048
+#define LZ4_COMP_BUF_SIZE    LZ4_COMPRESSBOUND(BUFFER_SIZE)
+#define FPGA_DATA_MASK       0x0000FF00u
+#define FPGA_CCLK_MASK       (1u << FPGA_CONFIG_CCLK)
+#define RESET_HOLD_SAMPLE_MS 100
+#define RESET_HOLD_SECONDS   5
+#define RESET_HOLD_TICKS     ((RESET_HOLD_SECONDS * 1000) / RESET_HOLD_SAMPLE_MS)
 
 // Prototypes
 void f256k2_context_man_init_io(void);
@@ -97,15 +102,16 @@ bool program_fpga_from_gz_file_path(const char* gz_path);
 
 typedef struct {
     const char* base_path;
+    const char* update_filename;
     const char* fallback_filename;
     uint32_t flash_base;
 } fpga_image_info_t;
 
 static const fpga_image_info_t fpga_images[] = {
-    { "CNTX1", "CFP95600C.bin", FPGA_FLASH_LZ4_BASE0 },
-    { "CNTX2", "CFP95616E.bin", FPGA_FLASH_LZ4_BASE1 },
-    { "CNTX3", "f256k2t9.bin", FPGA_FLASH_LZ4_BASE2 },
-    { "CNTX4", "foenix138.bin", FPGA_FLASH_LZ4_BASE3 },
+    { "CNTX1", "context1.bin", "CFP95600C.bin", FPGA_FLASH_LZ4_BASE0 },
+    { "CNTX2", "context2.bin", "CFP95616E.bin", FPGA_FLASH_LZ4_BASE1 },
+    { "CNTX3", "context3.bin", "f256k2t9.bin", FPGA_FLASH_LZ4_BASE2 },
+    { "CNTX4", "context4.bin", "foenix138.bin", FPGA_FLASH_LZ4_BASE3 },
 };
 
 typedef enum {
@@ -115,6 +121,7 @@ typedef enum {
     FPGA_METHOD_SD_RAW,
     FPGA_METHOD_FLASH_LZ4,
     FPGA_METHOD_FLASH_GZIP,
+    FPGA_METHOD_GOLDEN_LZ4,
 } fpga_method_t;
 
 static std::array fpga_method_names {
@@ -124,19 +131,54 @@ static std::array fpga_method_names {
     "SD raw",
     "FLASH LZ4",
     "FLASH gzip",
+    "GOLDEN LZ4",
 };
 
-static_assert(FPGA_METHOD_FLASH_GZIP == fpga_method_names.size() - 1);
+static_assert(FPGA_METHOD_GOLDEN_LZ4 == fpga_method_names.size() - 1);
 
 fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info);
 fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_t slot);
 
 bool program_fpga_from_lz4_data(const uint8_t* data, size_t len);
+fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice);
 bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos);
 bool fil_read_exact(FIL* fil, void* dst, UINT len);
+bool reset_hold_timer_callback(struct repeating_timer* timer);
+void start_reset_hold_monitor(void);
 
 unsigned char Buffer0[BUFFER_SIZE];
 static uint8_t lz4_comp_buf[LZ4_COMP_BUF_SIZE];
+static struct repeating_timer reset_hold_timer;
+static volatile unsigned int reset_hold_ticks = 0;
+static volatile bool reset_hold_armed = false;
+
+bool reset_hold_timer_callback(struct repeating_timer* timer)
+{
+    (void)timer;
+    if (gpio_get(FPGA_SYSTEM_RSTn)) {
+        reset_hold_ticks = 0;
+        reset_hold_armed = true;
+        return true;
+    }
+    if (!reset_hold_armed) {
+        return true;
+    }
+    if (++reset_hold_ticks >= RESET_HOLD_TICKS) {
+        watchdog_reboot(0, 0, 0);
+        return false;
+    }
+    return true;
+}
+
+void start_reset_hold_monitor(void)
+{
+    reset_hold_ticks = 0;
+    reset_hold_armed = false;
+    if (!add_repeating_timer_ms(-RESET_HOLD_SAMPLE_MS, reset_hold_timer_callback,
+                                NULL, &reset_hold_timer)) {
+        printf("Warning: RESET hold monitor unavailable\n");
+    }
+}
 
 #if USE_PIO_FPGA
 static PIO fpga_pio = pio0;
@@ -320,6 +362,28 @@ static bool find_wildbits_image(const char* dir, const char* suffix, char* out_p
     return found;
 }
 
+extern "C" {
+extern const uint8_t golden_fpga_context1_start[];
+extern const uint8_t golden_fpga_context1_end[];
+extern const uint8_t golden_fpga_context3_start[];
+extern const uint8_t golden_fpga_context3_end[];
+extern const uint8_t golden_fpga_context4_start[];
+extern const uint8_t golden_fpga_context4_end[];
+}
+
+typedef struct {
+    const uint8_t* start;
+    const uint8_t* end;
+} golden_image_t;
+
+static const golden_image_t golden_images[] = {
+    { golden_fpga_context1_start, golden_fpga_context1_end },
+    { golden_fpga_context1_start, golden_fpga_context1_end },
+    { golden_fpga_context3_start, golden_fpga_context3_end },
+    { golden_fpga_context4_start, golden_fpga_context4_end },
+};
+static const uint8_t golden_source_context[] = { 1, 1, 3, 4 };
+
 // See FatFs - Generic FAT Filesystem Module, "Application Interface",
 // http://elm-chan.org/fsw/ff/00index_e.html
 
@@ -334,7 +398,12 @@ int main()
 
     f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
 
-    // start timing
+    // Holding the active-low system reset for at least 500 ms during manager
+    // startup forces the immutable golden image selected by the context DIP.
+    bool force_golden = !gpio_get(FPGA_SYSTEM_RSTn);
+    sleep_ms(500);
+    force_golden = force_golden && !gpio_get(FPGA_SYSTEM_RSTn);
+
     absolute_time_t start = get_absolute_time();
 
     // read the DIP switches to select the FPGA context to program
@@ -357,7 +426,10 @@ int main()
 
     FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
 
-    if (fr != FR_OK) {
+    bool sd_mounted = (fr == FR_OK);
+    if (force_golden) {
+        method = program_fpga_from_golden_slot(dip_switches);
+    } else if (!sd_mounted) {
         printf("SD card not found, attempting to program from flash\n");
         method = program_fpga_from_flash_slot(info, dip_switches);
     } else {
@@ -368,29 +440,59 @@ int main()
         }
     }
 
-    f_unmount(pSD->pcName);
+    if (method == FPGA_METHOD_NONE) {
+        printf("Primary image failed; trying golden slot %u\n", dip_switches);
+        method = program_fpga_from_golden_slot(dip_switches);
+    }
 
     if (method == FPGA_METHOD_NONE) {
-        panic("Programming failed\n");
+        panic("Golden FPGA recovery image failed\n");
     }
 
     // measure programming time
     int64_t fpga_us = absolute_time_diff_us(start, get_absolute_time());
 
-    printf("=== Wildbits FPGA Loader ===\n");
-    if (method <= FPGA_METHOD_SD_RAW)
-        printf("Context  : %s\n", info->base_path);
-    else
-        printf("Slot     : %d\n", dip_switches);
-
+    printf("=== Wildbits FPGA Manager ===\n");
     printf("Method   : %s\n", fpga_method_names[method]);
     printf("Time     : %lldms\n", fpga_us / 1000);
-    printf("============================\n");
+    printf("Core Slot: %d\n", dip_switches);
+    printf("=============================\n");
 
-    set_sys_clock_khz(133000, true); // 328us
+    // Keep clk_sys unchanged so UART baud and other clock-derived peripheral
+    // settings remain valid after FPGA programming.
+    supervisor_service_init(sd_mounted);
+    start_reset_hold_monitor();
 
-    for (;;)
-        ;
+    bool reconfigure_armed = false;
+    uint8_t reconfigure_slot = 0;
+    for (;;) {
+        uint8_t requested_slot = 0;
+        bool requested = supervisor_service_once(&requested_slot);
+
+        // The transaction above sends the response prepared for the previous
+        // request. Waiting one transaction guarantees that RECONFIGURE is
+        // acknowledged before the FPGA disappears from the supervisor bus.
+        if (reconfigure_armed) {
+            const fpga_image_info_t* next_info = &fpga_images[reconfigure_slot];
+            fpga_method_t next = FPGA_METHOD_NONE;
+            if (sd_mounted) {
+                next = program_fpga_from_sd_card(next_info);
+            }
+            if (next == FPGA_METHOD_NONE) {
+                next = program_fpga_from_flash_slot(next_info, reconfigure_slot);
+            }
+            if (next == FPGA_METHOD_NONE) {
+                next = program_fpga_from_golden_slot(reconfigure_slot);
+            }
+            printf("Runtime reconfigure slot %u: %s\n", reconfigure_slot,
+                   fpga_method_names[next]);
+            reconfigure_armed = false;
+        }
+        if (requested) {
+            reconfigure_slot = requested_slot;
+            reconfigure_armed = true;
+        }
+    }
 }
 
 bool program_fpga_from_lz4_file(const char* path)
@@ -651,16 +753,27 @@ bool program_fpga_from_file_path(const char* path)
 
 fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info)
 {
+    char update_path[256];
     char fallback_path[256];
     char wildbits_path[256];
-    int written = snprintf(fallback_path, sizeof(fallback_path), "%s/%s",
-                           info->base_path, info->fallback_filename);
+    int written = snprintf(update_path, sizeof(update_path), "%s/%s",
+                           info->base_path, info->update_filename);
+    if (written <= 0 || written >= (int)sizeof(update_path)) {
+        printf("Update path too long\n");
+        return FPGA_METHOD_NONE;
+    }
+    written = snprintf(fallback_path, sizeof(fallback_path), "%s/%s",
+                       info->base_path, info->fallback_filename);
     if (written <= 0 || written >= (int)sizeof(fallback_path)) {
         printf("Fallback path too long\n");
         return FPGA_METHOD_NONE;
     }
 
-    printf("FPGA image base path: %s, fallback file: %s\n", info->base_path, info->fallback_filename);
+    printf("FPGA image base path: %s, update file: %s\n",
+           info->base_path, info->update_filename);
+    if (program_fpga_from_file_path(update_path)) {
+        return FPGA_METHOD_SD_RAW;
+    }
     printf("Searching %s for Wildbits*.{lz4,gz,bin}\n", info->base_path);
 
     if (find_wildbits_image(info->base_path, ".lz4", wildbits_path, sizeof(wildbits_path))) {
@@ -714,6 +827,25 @@ fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_
     const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
     if (program_fpga_from_lz4_data(data, FPGA_FLASH_SLOT_SIZE)) {
         return FPGA_METHOD_FLASH_LZ4;
+    }
+    return FPGA_METHOD_NONE;
+}
+
+fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice)
+{
+    const unsigned int slot = sw_choice & 0x03;
+    const golden_image_t* image = &golden_images[slot];
+    const size_t length = static_cast<size_t>(image->end - image->start);
+    const unsigned int requested_context = slot + 1;
+    const unsigned int source_context = golden_source_context[slot];
+    if (requested_context != source_context) {
+        printf("Golden context %u is unavailable; using context %u rescue image\n",
+               requested_context, source_context);
+    }
+    printf("Programming embedded golden context %u (%u bytes)\n",
+           source_context, static_cast<unsigned int>(length));
+    if (program_fpga_from_lz4_data(image->start, length)) {
+        return FPGA_METHOD_GOLDEN_LZ4;
     }
     return FPGA_METHOD_NONE;
 }
@@ -826,6 +958,7 @@ bool program_fpga_from_file(FIL fil)
         }
     }
 
+    // Every block, including the final partial block, was sent in the loop.
     // gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
 #if USE_PIO_FPGA
     fpga_pio_begin();
@@ -872,6 +1005,7 @@ void f256k2_context_man_init_io(void)
     gpio_set_dir(FPGA_CONFIG_CCLK, GPIO_OUT);
     gpio_set_dir(FPGA_CONFIG_INITn, GPIO_IN);
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+    gpio_pull_up(FPGA_SYSTEM_RSTn);
     // gpio_set_dir(FPGA_CONFIG_CSn, GPIO_OUT);
 
     gpio_set_dir(SPI_SD_SD1, GPIO_OUT);

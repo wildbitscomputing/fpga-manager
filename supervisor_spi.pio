@@ -1,0 +1,13 @@
+.program supervisor_spi
+
+; SPI mode 0 slave. The CPU/DMA supplies one 32-bit FIFO word per byte.
+; GPIO 0 is MISO, GPIO 1 is CSn, GPIO 2 is SCLK, and GPIO 3 is MOSI.
+.wrap_target
+    wait 0 gpio 1
+bit_loop:
+    out pins, 1
+    wait 1 gpio 2
+    in pins, 1
+    wait 0 gpio 2
+    jmp bit_loop
+.wrap

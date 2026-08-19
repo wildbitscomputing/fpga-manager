@@ -13,4 +13,7 @@ build_*/
 fpga/*.bin
 fpga/*.gz
 fpga/*.lz4
+!fpga/context1.lz4
+!fpga/context3.lz4
+!fpga/context4.lz4
 *.xlsx
