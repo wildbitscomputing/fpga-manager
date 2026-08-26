@@ -3,5 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct SupervisorReconfigureRequest {
+    uint8_t context;
+};
+
 void supervisor_service_init(bool sd_mounted);
-bool supervisor_service_once(uint8_t* reconfigure_slot);
+bool supervisor_service_once(SupervisorReconfigureRequest* request);

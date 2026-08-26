@@ -38,9 +38,9 @@ pico_sdk_init()
 
 # Golden images are linked into the manager below the mutable 8 MiB slot bank.
 # Context 2 has no core yet, so recovery for it deliberately uses context 1.
-set(GOLDEN_CONTEXT1 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.lz4 CACHE FILEPATH "Golden context 1 image")
-set(GOLDEN_CONTEXT3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.lz4 CACHE FILEPATH "Golden context 3 image")
-set(GOLDEN_CONTEXT4 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.lz4 CACHE FILEPATH "Golden context 4 image")
+set(GOLDEN_CONTEXT1 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.gz CACHE FILEPATH "Golden context 1 gzip image")
+set(GOLDEN_CONTEXT3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.gz CACHE FILEPATH "Golden context 3 gzip image")
+set(GOLDEN_CONTEXT4 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.gz CACHE FILEPATH "Golden context 4 gzip image")
 foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
     if(NOT EXISTS "${${GOLDEN_IMAGE}}")
         message(FATAL_ERROR "Missing required recovery image: ${${GOLDEN_IMAGE}}")
@@ -48,6 +48,10 @@ foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
     file(TO_CMAKE_PATH "${${GOLDEN_IMAGE}}" ${GOLDEN_IMAGE})
 endforeach()
 configure_file(golden_images.S.in ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S @ONLY)
+set_property(SOURCE ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S APPEND PROPERTY
+    OBJECT_DEPENDS
+        "${GOLDEN_CONTEXT1};${GOLDEN_CONTEXT3};${GOLDEN_CONTEXT4}"
+)
 set(GOLDEN_FPGA_TOTAL_SIZE 0)
 foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
     file(SIZE "${${GOLDEN_IMAGE}}" GOLDEN_IMAGE_SIZE)
@@ -61,12 +65,12 @@ add_subdirectory(FatFs_SPI build)
 
 # Add executable. Default name is the project name, version 0.1
 add_executable(fpga_mgr
+    boot_config.cpp
     fpga_mgr.cpp
     hw_config.c
     miniz.c
     miniz_tinfl.c
     miniz_tdef.c
-    lz4.c
     supervisor_service.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S
 )
@@ -109,25 +113,20 @@ target_link_libraries(fpga_mgr
     FatFs_SPI
 )
 
-add_custom_target(mk_lz4_blocks
-    COMMAND cc -O2 -I${CMAKE_CURRENT_LIST_DIR}
-            -o ${CMAKE_CURRENT_BINARY_DIR}/mk_lz4_blocks
-            ${CMAKE_CURRENT_LIST_DIR}/tools/mk_lz4_blocks.c
-            ${CMAKE_CURRENT_LIST_DIR}/lz4.c
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
-    COMMENT "Building host mk_lz4_blocks tool"
-)
-
 find_package(Python3 COMPONENTS Interpreter)
 
-set(PICOTOOL_EXECUTABLE ${USERHOME}/.pico-sdk/picotool/${picotoolVersion}/picotool/picotool)
-if (NOT EXISTS ${PICOTOOL_EXECUTABLE})
+set(_PICO_VSCODE_PICOTOOL ${USERHOME}/.pico-sdk/picotool/${picotoolVersion}/picotool/picotool)
+if (EXISTS ${_PICO_VSCODE_PICOTOOL})
+    set(PICOTOOL_EXECUTABLE ${_PICO_VSCODE_PICOTOOL})
+else()
+    unset(PICOTOOL_EXECUTABLE CACHE)
+    unset(PICOTOOL_EXECUTABLE)
     find_program(PICOTOOL_EXECUTABLE picotool)
 endif()
 
-set(FPGA_LZ4_0 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.lz4)
-set(FPGA_LZ4_2 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.lz4)
-set(FPGA_LZ4_3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.lz4)
+set(FPGA_GZIP_0 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.gz)
+set(FPGA_GZIP_2 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.gz)
+set(FPGA_GZIP_3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.gz)
 set(FPGA_UF2_0 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot0.uf2)
 set(FPGA_UF2_2 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot2.uf2)
 set(FPGA_UF2_3 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot3.uf2)
@@ -136,17 +135,17 @@ set(COMBINED_UF2 ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_with_fpga.uf2)
 if (PICOTOOL_EXECUTABLE AND Python3_Interpreter_FOUND)
     add_custom_command(
         OUTPUT ${FPGA_UF2_0} ${FPGA_UF2_2} ${FPGA_UF2_3} ${COMBINED_UF2}
-        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10800000 -t bin ${FPGA_LZ4_0} ${FPGA_UF2_0} --family rp2040
-        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10C00000 -t bin ${FPGA_LZ4_2} ${FPGA_UF2_2} --family rp2040
-        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10E00000 -t bin ${FPGA_LZ4_3} ${FPGA_UF2_3} --family rp2040
+        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10800000 -t bin ${FPGA_GZIP_0} ${FPGA_UF2_0} --family rp2040
+        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10C00000 -t bin ${FPGA_GZIP_2} ${FPGA_UF2_2} --family rp2040
+        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10E00000 -t bin ${FPGA_GZIP_3} ${FPGA_UF2_3} --family rp2040
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/tools/concat_uf2.py
                 ${COMBINED_UF2}
                 ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr.uf2
                 ${FPGA_UF2_0}
                 ${FPGA_UF2_2}
                 ${FPGA_UF2_3}
-        DEPENDS fpga_mgr ${FPGA_LZ4_0} ${FPGA_LZ4_2} ${FPGA_LZ4_3}
-        COMMENT "Building combined UF2 with FPGA LZ4 blobs"
+        DEPENDS fpga_mgr ${FPGA_GZIP_0} ${FPGA_GZIP_2} ${FPGA_GZIP_3}
+        COMMENT "Building combined UF2 with FPGA gzip blobs"
     )
     add_custom_target(fpga_mgr_with_fpga_uf2 DEPENDS ${COMBINED_UF2})
 else()
@@ -177,7 +176,18 @@ pico_set_program_version(fpga_mgr "0.1")
 # Choose source and destination for standard input and output:
 #   See 4.1. Serial input and output on Raspberry Pi Pico in Getting started with Raspberry Pi Pico (https://datasheets.raspberrypi.org/pico/getting-started-with-pico.pdf)
 #   and 2.7.1. Standard Input/Output (stdio) Support in Raspberry Pi Pico C/C++ SDK (https://datasheets.raspberrypi.org/pico/raspberry-pi-pico-c-sdk.pdf):
-#pico_enable_stdio_uart(fpga_mgr 1)
+option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" ON)
+if(FPGA_MGR_UART_DEBUG)
+    target_compile_definitions(fpga_mgr PRIVATE
+        PICO_DEFAULT_UART=1
+        PICO_DEFAULT_UART_TX_PIN=24
+        PICO_DEFAULT_UART_RX_PIN=25
+        PICO_DEFAULT_UART_BAUD_RATE=115200
+    )
+    pico_enable_stdio_uart(fpga_mgr 1)
+else()
+    pico_enable_stdio_uart(fpga_mgr 0)
+endif()
 pico_enable_stdio_usb(fpga_mgr 1)
 pico_add_extra_outputs(fpga_mgr)
 

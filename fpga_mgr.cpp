@@ -15,9 +15,9 @@
 #include "rtc.h"
 //
 #include "fpga_out.pio.h"
+#include "boot_config.h"
 #include "hardware/clocks.h"
 #include "hw_config.h"
-#include "lz4.h"
 #include "miniz.h"
 #include "supervisor_service.h"
 
@@ -74,9 +74,9 @@
 #define FPGA_SIZE            9730652
 #define BUFFER_SIZE          32768
 #define GZ_IN_BUF_SIZE       2048
-#define LZ4_COMP_BUF_SIZE    LZ4_COMPRESSBOUND(BUFFER_SIZE)
 #define FPGA_DATA_MASK       0x0000FF00u
 #define FPGA_CCLK_MASK       (1u << FPGA_CONFIG_CCLK)
+#define FPGA_INIT_TIMEOUT_MS 100
 #define RESET_HOLD_SAMPLE_MS 100
 #define RESET_HOLD_SECONDS   5
 #define RESET_HOLD_TICKS     ((RESET_HOLD_SECONDS * 1000) / RESET_HOLD_SAMPLE_MS)
@@ -84,20 +84,18 @@
 // Prototypes
 void f256k2_context_man_init_io(void);
 static inline void f256k2_Set_FPGA_Data_Port(unsigned char Value);
-void f256k2_init_prg_fpga(void);
-void f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len);
-bool program_fpga_from_file(FIL fil);
-bool program_fpga_from_lz4_file(const char* path);
+bool f256k2_init_prg_fpga(void);
+bool f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len);
+bool program_fpga_from_file(FIL* fil);
 bool program_fpga_from_gz_file(const char* path);
 bool program_fpga_from_file_path(const char* path);
-bool program_fpga_from_lz4_file_path(const char* lz4_path);
 bool program_fpga_from_gz_file_path(const char* gz_path);
 
-// External FPGA LZ4 blobs are stored in flash at fixed addresses.
-#define FPGA_FLASH_LZ4_BASE0 0x10800000u
-#define FPGA_FLASH_LZ4_BASE1 0x10A00000u
-#define FPGA_FLASH_LZ4_BASE2 0x10C00000u
-#define FPGA_FLASH_LZ4_BASE3 0x10E00000u
+// External FPGA gzip blobs are stored in flash at fixed addresses.
+#define FPGA_FLASH_GZIP_BASE0 0x10800000u
+#define FPGA_FLASH_GZIP_BASE1 0x10A00000u
+#define FPGA_FLASH_GZIP_BASE2 0x10C00000u
+#define FPGA_FLASH_GZIP_BASE3 0x10E00000u
 #define FPGA_FLASH_SLOT_SIZE (2 * 1024 * 1024u)
 
 typedef struct {
@@ -108,46 +106,43 @@ typedef struct {
 } fpga_image_info_t;
 
 static const fpga_image_info_t fpga_images[] = {
-    { "CNTX1", "context1.bin", "CFP95600C.bin", FPGA_FLASH_LZ4_BASE0 },
-    { "CNTX2", "context2.bin", "CFP95616E.bin", FPGA_FLASH_LZ4_BASE1 },
-    { "CNTX3", "context3.bin", "f256k2t9.bin", FPGA_FLASH_LZ4_BASE2 },
-    { "CNTX4", "context4.bin", "foenix138.bin", FPGA_FLASH_LZ4_BASE3 },
+    { "CNTX1", "context1.bin", "CFP95600C.bin", FPGA_FLASH_GZIP_BASE0 },
+    { "CNTX2", "context2.bin", "CFP95616E.bin", FPGA_FLASH_GZIP_BASE1 },
+    { "CNTX3", "context3.bin", "f256k2t9.bin", FPGA_FLASH_GZIP_BASE2 },
+    { "CNTX4", "context4.bin", "foenix138.bin", FPGA_FLASH_GZIP_BASE3 },
 };
 
 typedef enum {
     FPGA_METHOD_NONE = 0,
-    FPGA_METHOD_SD_LZ4,
     FPGA_METHOD_SD_GZIP,
     FPGA_METHOD_SD_RAW,
-    FPGA_METHOD_FLASH_LZ4,
     FPGA_METHOD_FLASH_GZIP,
-    FPGA_METHOD_GOLDEN_LZ4,
+    FPGA_METHOD_GOLDEN_GZIP,
 } fpga_method_t;
 
 static std::array fpga_method_names {
     "none",
-    "SD LZ4",
     "SD gzip",
     "SD raw",
-    "FLASH LZ4",
     "FLASH gzip",
-    "GOLDEN LZ4",
+    "GOLDEN gzip",
 };
 
-static_assert(FPGA_METHOD_GOLDEN_LZ4 == fpga_method_names.size() - 1);
+static_assert(FPGA_METHOD_GOLDEN_GZIP == fpga_method_names.size() - 1);
 
-fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info);
+fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info, uint8_t slot);
+fpga_method_t program_fpga_from_sd_path(const char* path, uint8_t slot);
 fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_t slot);
 
-bool program_fpga_from_lz4_data(const uint8_t* data, size_t len);
+bool program_fpga_from_gz_data(const uint8_t* data, size_t len, bool allow_ff_padding);
 fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice);
-bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos);
-bool fil_read_exact(FIL* fil, void* dst, UINT len);
+fpga_method_t program_selected_context(uint8_t slot, bool sd_mounted,
+                                       bool force_golden);
 bool reset_hold_timer_callback(struct repeating_timer* timer);
 void start_reset_hold_monitor(void);
 
 unsigned char Buffer0[BUFFER_SIZE];
-static uint8_t lz4_comp_buf[LZ4_COMP_BUF_SIZE];
+static uint8_t gzip_file_buffer[GZ_IN_BUF_SIZE];
 static struct repeating_timer reset_hold_timer;
 static volatile unsigned int reset_hold_ticks = 0;
 static volatile bool reset_hold_armed = false;
@@ -397,6 +392,7 @@ int main()
     // stdio_uart_init_full(uart1, BAUD_RATE, UART_TX_PIN, -1);       // Setup STDIO to Terminal UART (to be removed later)
 
     f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
+    boot_config_init();
 
     // Holding the active-low system reset for at least 500 ms during manager
     // startup forces the immutable golden image selected by the context DIP.
@@ -415,7 +411,6 @@ int main()
 
     printf("Selected slot index (0-3): %u\n", dip_switches);
 
-    const fpga_image_info_t* info = &fpga_images[dip_switches];
     fpga_method_t method = FPGA_METHOD_NONE;
 
     // mount the SD card
@@ -427,23 +422,7 @@ int main()
     FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
 
     bool sd_mounted = (fr == FR_OK);
-    if (force_golden) {
-        method = program_fpga_from_golden_slot(dip_switches);
-    } else if (!sd_mounted) {
-        printf("SD card not found, attempting to program from flash\n");
-        method = program_fpga_from_flash_slot(info, dip_switches);
-    } else {
-        method = program_fpga_from_sd_card(info);
-        if (method == FPGA_METHOD_NONE) {
-            printf("No matching image found, attempting to program from flash slot\n");
-            method = program_fpga_from_flash_slot(info, dip_switches);
-        }
-    }
-
-    if (method == FPGA_METHOD_NONE) {
-        printf("Primary image failed; trying golden slot %u\n", dip_switches);
-        method = program_fpga_from_golden_slot(dip_switches);
-    }
+    method = program_selected_context(dip_switches, sd_mounted, force_golden);
 
     if (method == FPGA_METHOD_NONE) {
         panic("Golden FPGA recovery image failed\n");
@@ -466,175 +445,301 @@ int main()
     bool reconfigure_armed = false;
     uint8_t reconfigure_slot = 0;
     for (;;) {
-        uint8_t requested_slot = 0;
-        bool requested = supervisor_service_once(&requested_slot);
+        SupervisorReconfigureRequest request{};
+        bool requested = supervisor_service_once(&request);
 
         // The transaction above sends the response prepared for the previous
         // request. Waiting one transaction guarantees that RECONFIGURE is
         // acknowledged before the FPGA disappears from the supervisor bus.
         if (reconfigure_armed) {
-            const fpga_image_info_t* next_info = &fpga_images[reconfigure_slot];
-            fpga_method_t next = FPGA_METHOD_NONE;
-            if (sd_mounted) {
-                next = program_fpga_from_sd_card(next_info);
-            }
-            if (next == FPGA_METHOD_NONE) {
-                next = program_fpga_from_flash_slot(next_info, reconfigure_slot);
-            }
-            if (next == FPGA_METHOD_NONE) {
-                next = program_fpga_from_golden_slot(reconfigure_slot);
-            }
+            fpga_method_t next = program_selected_context(
+                reconfigure_slot, sd_mounted, false);
             printf("Runtime reconfigure slot %u: %s\n", reconfigure_slot,
                    fpga_method_names[next]);
             reconfigure_armed = false;
         }
         if (requested) {
-            reconfigure_slot = requested_slot;
+            reconfigure_slot = request.context;
             reconfigure_armed = true;
         }
     }
 }
 
-bool program_fpga_from_lz4_file(const char* path)
+struct gzip_source_t {
+    FIL* file;
+    const uint8_t* memory;
+    size_t memory_size;
+    size_t memory_pos;
+    size_t file_pos;
+    size_t file_len;
+    bool read_error;
+};
+
+static uint32_t read_le32_bytes(const uint8_t* p)
 {
-    char lz4_path[256];
-    int written = snprintf(lz4_path, sizeof(lz4_path), "%s.lz4", path);
-    if (written <= 0 || written >= (int)sizeof(lz4_path)) {
-        printf("lz4 path too long\n");
-        return false;
-    }
-    return program_fpga_from_lz4_file_path(lz4_path);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-bool program_fpga_from_lz4_file_path(const char* lz4_path)
+static bool gzip_source_read_byte(gzip_source_t* source, uint8_t* out)
 {
-    FIL fil;
-    FRESULT fr = f_open(&fil, lz4_path, FA_READ);
-    if (fr != FR_OK) {
+    if (source->memory) {
+        if (source->memory_pos >= source->memory_size) {
+            return false;
+        }
+        *out = source->memory[source->memory_pos++];
+        return true;
+    }
+
+    if (source->file_pos >= source->file_len) {
+        UINT read = 0;
+        FRESULT result = f_read(source->file, gzip_file_buffer,
+                                sizeof(gzip_file_buffer), &read);
+        if (result != FR_OK) {
+            source->read_error = true;
+            return false;
+        }
+        source->file_pos = 0;
+        source->file_len = read;
+        if (read == 0) {
+            return false;
+        }
+    }
+    *out = gzip_file_buffer[source->file_pos++];
+    return true;
+}
+
+static bool gzip_source_supply(gzip_source_t* source, mz_stream* stream)
+{
+    if (stream->avail_in != 0) {
+        return true;
+    }
+    if (source->memory) {
+        if (source->memory_pos >= source->memory_size) {
+            return false;
+        }
+        size_t available = source->memory_size - source->memory_pos;
+        stream->next_in = source->memory + source->memory_pos;
+        stream->avail_in = static_cast<unsigned int>(available);
+        source->memory_pos += available;
+        return true;
+    }
+
+    if (source->file_pos >= source->file_len) {
+        UINT read = 0;
+        FRESULT result = f_read(source->file, gzip_file_buffer,
+                                sizeof(gzip_file_buffer), &read);
+        if (result != FR_OK) {
+            source->read_error = true;
+            return false;
+        }
+        source->file_pos = 0;
+        source->file_len = read;
+    }
+    if (source->file_pos >= source->file_len) {
+        return false;
+    }
+    stream->next_in = gzip_file_buffer + source->file_pos;
+    stream->avail_in = static_cast<unsigned int>(source->file_len - source->file_pos);
+    source->file_pos = source->file_len;
+    return true;
+}
+
+static bool gzip_skip_header(gzip_source_t* source)
+{
+    mz_ulong header_crc = MZ_CRC32_INIT;
+    auto read_header_byte = [&](uint8_t* out) -> bool {
+        if (!gzip_source_read_byte(source, out)) {
+            return false;
+        }
+        header_crc = mz_crc32(header_crc, out, 1);
+        return true;
+    };
+
+    uint8_t header[10];
+    for (uint8_t& byte : header) {
+        if (!read_header_byte(&byte)) {
+            return false;
+        }
+    }
+    if (header[0] != 0x1f || header[1] != 0x8b || header[2] != 8 ||
+        (header[3] & 0xe0) != 0) {
         return false;
     }
 
-    uint32_t total_size = 0;
-    if (!fil_read_exact(&fil, &total_size, sizeof(total_size))) {
-        f_close(&fil);
-        return false;
+    const uint8_t flags = header[3];
+    if (flags & 0x04) {
+        uint8_t lo = 0, hi = 0;
+        if (!read_header_byte(&lo) || !read_header_byte(&hi)) {
+            return false;
+        }
+        uint16_t length = (uint16_t)lo | ((uint16_t)hi << 8);
+        while (length-- != 0) {
+            uint8_t ignored = 0;
+            if (!read_header_byte(&ignored)) {
+                return false;
+            }
+        }
     }
-    if (total_size == 0x184D2204u) {
-        f_close(&fil);
-        return false;
+    for (uint8_t optional_flag : {uint8_t{0x08}, uint8_t{0x10}}) {
+        if (flags & optional_flag) {
+            uint8_t byte = 0;
+            do {
+                if (!read_header_byte(&byte)) {
+                    return false;
+                }
+            } while (byte != 0);
+        }
     }
-    (void)total_size;
+    if (flags & 0x02) {
+        uint8_t lo = 0, hi = 0;
+        uint16_t expected_header_crc = 0;
+        if (!gzip_source_read_byte(source, &lo) ||
+            !gzip_source_read_byte(source, &hi)) {
+            return false;
+        }
+        expected_header_crc = (uint16_t)lo | ((uint16_t)hi << 8);
+        if (expected_header_crc != static_cast<uint16_t>(header_crc)) {
+            return false;
+        }
+    }
+    return true;
+}
 
-    printf("Programming from SD (lz4 raw): %s\n", lz4_path);
-    f256k2_init_prg_fpga();
+static bool gzip_read_after_stream(gzip_source_t* source, mz_stream* stream,
+                                   uint8_t* out)
+{
+    if (stream->avail_in != 0) {
+        *out = *stream->next_in++;
+        --stream->avail_in;
+        return true;
+    }
+    return gzip_source_read_byte(source, out);
+}
+
+static bool gzip_trailing_data_ok(gzip_source_t* source, mz_stream* stream,
+                                  bool allow_ff_padding)
+{
+    uint8_t byte = 0;
+    while (gzip_read_after_stream(source, stream, &byte)) {
+        if (!allow_ff_padding || byte != 0xff) {
+            return false;
+        }
+    }
+    return !source->read_error;
+}
+
+static inline void pulse_fpga_config_clock()
+{
+    gpio_put(FPGA_CONFIG_CCLK, 0);
+    gpio_put(FPGA_CONFIG_CCLK, 1);
+}
+
+static bool wait_for_fpga_init(bool high)
+{
+    const absolute_time_t deadline = make_timeout_time_ms(FPGA_INIT_TIMEOUT_MS);
+    do {
+        pulse_fpga_config_clock();
+        if (gpio_get(FPGA_CONFIG_INITn) == high) {
+            return true;
+        }
+    } while (!time_reached(deadline));
+    return false;
+}
+
+static bool finish_fpga_programming()
+{
+#if USE_PIO_FPGA
+    fpga_pio_enable(false);
+#endif
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
+    for (unsigned int k = 0; k < 100; ++k) {
+        pulse_fpga_config_clock();
+    }
+    const bool init_high = gpio_get(FPGA_CONFIG_INITn);
+    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
+    if (!init_high) {
+        printf("FPGA configuration failed: INITn is low after startup clocks\n");
+        return false;
+    }
+    printf("FPGA configuration accepted: INITn remained high\n");
+    return true;
+}
+
+static bool program_fpga_from_gzip_source(gzip_source_t* source,
+                                          bool allow_ff_padding)
+{
+    if (!gzip_skip_header(source)) {
+        printf("gzip header error\n");
+        return false;
+    }
+
+    mz_stream stream{};
+    int result = mz_inflateInit2(&stream, -MZ_DEFAULT_WINDOW_BITS);
+    if (result != MZ_OK) {
+        printf("inflate init failed: %d\n", result);
+        return false;
+    }
+
+    mz_ulong output_crc = MZ_CRC32_INIT;
+    uint32_t output_size = 0;
+    if (!f256k2_init_prg_fpga()) {
+        mz_inflateEnd(&stream);
+        return false;
+    }
 
     for (;;) {
-        uint32_t out_len = 0;
-        uint32_t in_len = 0;
-        if (!fil_read_exact(&fil, &out_len, sizeof(out_len)) ||
-            !fil_read_exact(&fil, &in_len, sizeof(in_len))) {
-            printf("lz4 header read failed\n");
-            f_close(&fil);
-            return false;
-        }
-        if (out_len == 0 && in_len == 0) {
-            break;
-        }
-        if (out_len > BUFFER_SIZE || in_len > LZ4_COMP_BUF_SIZE) {
-            printf("lz4 block too large\n");
-            f_close(&fil);
-            return false;
-        }
-        if (!fil_read_exact(&fil, lz4_comp_buf, (UINT)in_len)) {
-            printf("lz4 read failed\n");
-            f_close(&fil);
+        if (!gzip_source_supply(source, &stream)) {
+            printf(source->read_error ? "gzip read failed\n" : "gzip truncated\n");
+            mz_inflateEnd(&stream);
             return false;
         }
 
-        int dec = LZ4_decompress_safe((const char*)lz4_comp_buf, (char*)Buffer0,
-                                      (int)in_len, (int)out_len);
-        if (dec < 0 || (uint32_t)dec != out_len) {
-            printf("lz4 decompress failed\n");
-            f_close(&fil);
+        stream.next_out = Buffer0;
+        stream.avail_out = BUFFER_SIZE;
+        result = mz_inflate(&stream, MZ_NO_FLUSH);
+        size_t produced = BUFFER_SIZE - stream.avail_out;
+        if (produced > FPGA_SIZE - output_size) {
+            printf("gzip output exceeds FPGA image size\n");
+            mz_inflateEnd(&stream);
             return false;
         }
-        f256k2_prg_block_fpga(Buffer0, (unsigned int)out_len);
+        if (produced != 0) {
+            output_crc = mz_crc32(output_crc, Buffer0, produced);
+            output_size += static_cast<uint32_t>(produced);
+            if (!f256k2_prg_block_fpga(Buffer0,
+                                       static_cast<unsigned int>(produced))) {
+                mz_inflateEnd(&stream);
+                return false;
+            }
+        }
+
+        if (result == MZ_STREAM_END) {
+            uint8_t trailer[8];
+            bool trailer_ok = true;
+            for (uint8_t& byte : trailer) {
+                if (!gzip_read_after_stream(source, &stream, &byte)) {
+                    trailer_ok = false;
+                    break;
+                }
+            }
+            if (!trailer_ok || read_le32_bytes(trailer) != output_crc ||
+                read_le32_bytes(trailer + 4) != output_size ||
+                output_size != FPGA_SIZE ||
+                !gzip_trailing_data_ok(source, &stream, allow_ff_padding)) {
+                printf("gzip CRC or FPGA image size mismatch\n");
+                mz_inflateEnd(&stream);
+                return false;
+            }
+            mz_inflateEnd(&stream);
+            return finish_fpga_programming();
+        }
+        if (result != MZ_OK) {
+            printf("inflate failed: %d\n", result);
+            mz_inflateEnd(&stream);
+            return false;
+        }
     }
-
-#if USE_PIO_FPGA
-    fpga_pio_enable(false);
-#endif
-    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (unsigned int k = 0; k < 100; k++) {
-        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
-    }
-    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
-
-    f_close(&fil);
-    return true;
-}
-
-bool program_fpga_from_lz4_data(const uint8_t* data, size_t len)
-{
-    if (!data || len < 4) {
-        return false;
-    }
-    uint32_t total_size = (uint32_t)data[0] |
-                          ((uint32_t)data[1] << 8) |
-                          ((uint32_t)data[2] << 16) |
-                          ((uint32_t)data[3] << 24);
-
-    if (total_size == 0xffffffff) {
-        printf("Flash lz4 data not found\n");
-        return false;
-    }
-
-    size_t off = 4;
-    f256k2_init_prg_fpga();
-
-    while (off + 8 <= len) {
-        uint32_t out_len = (uint32_t)data[off] |
-                           ((uint32_t)data[off + 1] << 8) |
-                           ((uint32_t)data[off + 2] << 16) |
-                           ((uint32_t)data[off + 3] << 24);
-        uint32_t in_len = (uint32_t)data[off + 4] |
-                          ((uint32_t)data[off + 5] << 8) |
-                          ((uint32_t)data[off + 6] << 16) |
-                          ((uint32_t)data[off + 7] << 24);
-        off += 8;
-        if (out_len == 0 && in_len == 0) {
-            break;
-        }
-        if (out_len > BUFFER_SIZE || in_len > LZ4_COMP_BUF_SIZE) {
-            printf("Flash lz4 block too large\n");
-            return false;
-        }
-        if (off + in_len > len) {
-            printf("Flash lz4 truncated\n");
-            return false;
-        }
-        int dec = LZ4_decompress_safe((const char*)(data + off), (char*)Buffer0,
-                                      (int)in_len, (int)out_len);
-        if (dec < 0 || (uint32_t)dec != out_len) {
-            printf("Flash lz4 decompress failed\n");
-            return false;
-        }
-        f256k2_prg_block_fpga(Buffer0, (unsigned int)out_len);
-        off += in_len;
-    }
-
-#if USE_PIO_FPGA
-    fpga_pio_enable(false);
-#endif
-    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (unsigned int k = 0; k < 100; k++) {
-        gpio_put(FPGA_CONFIG_CCLK, 0);
-        gpio_put(FPGA_CONFIG_CCLK, 1);
-    }
-    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
-
-    return true;
 }
 
 bool program_fpga_from_gz_file(const char* path)
@@ -656,85 +761,20 @@ bool program_fpga_from_gz_file_path(const char* gz_path)
         return false;
     }
 
-    static uint8_t in_buf[GZ_IN_BUF_SIZE];
-    UINT in_len = 0;
-    UINT in_pos = 0;
-
-    if (!gzip_skip_header(&fil, in_buf, &in_len, &in_pos)) {
-        printf("gzip header error\n");
-        f_close(&fil);
-        return false;
-    }
-
     printf("Programming from SD (gzip): %s\n", gz_path);
-    mz_stream stream;
-    memset(&stream, 0, sizeof(stream));
+    gzip_source_t source{&fil, nullptr, 0, 0, 0, 0, false};
+    bool ok = program_fpga_from_gzip_source(&source, false);
+    f_close(&fil);
+    return ok;
+}
 
-    int ret = mz_inflateInit2(&stream, -MZ_DEFAULT_WINDOW_BITS);
-    if (ret != MZ_OK) {
-        printf("inflate init failed: %d\n", ret);
-        f_close(&fil);
+bool program_fpga_from_gz_data(const uint8_t* data, size_t len, bool allow_ff_padding)
+{
+    if (!data || len < 18 || (data[0] == 0xff && data[1] == 0xff)) {
         return false;
     }
-
-    f256k2_init_prg_fpga();
-
-    bool eof = false;
-    stream.next_in = in_buf + in_pos;
-    stream.avail_in = in_len - in_pos;
-
-    for (;;) {
-        if (stream.avail_in == 0) {
-            UINT br = 0;
-            fr = f_read(&fil, in_buf, sizeof(in_buf), &br);
-            if (fr != FR_OK) {
-                printf("gzip read failed\n");
-                mz_inflateEnd(&stream);
-                f_close(&fil);
-                return false;
-            }
-            if (br == 0) {
-                eof = true;
-            }
-            stream.next_in = in_buf;
-            stream.avail_in = br;
-        }
-
-        stream.next_out = Buffer0;
-        stream.avail_out = BUFFER_SIZE;
-        ret = mz_inflate(&stream, MZ_NO_FLUSH);
-        size_t produced = BUFFER_SIZE - stream.avail_out;
-        if (produced > 0) {
-            f256k2_prg_block_fpga(Buffer0, (unsigned int)produced);
-        }
-
-        if (ret == MZ_STREAM_END) {
-            mz_inflateEnd(&stream);
-#if USE_PIO_FPGA
-            fpga_pio_enable(false);
-#endif
-            gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-            for (unsigned int k = 0; k < 100; k++) {
-                gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-                gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
-            }
-            gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
-            f_close(&fil);
-            return true;
-        }
-        if (ret != MZ_OK) {
-            printf("inflate failed: %d\n", ret);
-            mz_inflateEnd(&stream);
-            f_close(&fil);
-            return false;
-        }
-        if (eof && stream.avail_in == 0) {
-            printf("gzip truncated\n");
-            mz_inflateEnd(&stream);
-            f_close(&fil);
-            return false;
-        }
-    }
+    gzip_source_t source{nullptr, data, len, 0, 0, 0, false};
+    return program_fpga_from_gzip_source(&source, allow_ff_padding);
 }
 
 bool program_fpga_from_file_path(const char* path)
@@ -746,12 +786,35 @@ bool program_fpga_from_file_path(const char* path)
     }
 
     printf("Programming from SD (raw): %s\n", path);
-    bool ok = program_fpga_from_file(fil);
+    bool ok = program_fpga_from_file(&fil);
     f_close(&fil);
     return ok;
 }
 
-fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info)
+fpga_method_t program_fpga_from_sd_path(const char* path, uint8_t slot)
+{
+    if (!path || slot >= std::size(fpga_images)) {
+        return FPGA_METHOD_NONE;
+    }
+    fpga_method_t method = FPGA_METHOD_NONE;
+    if (ends_with_casefold(path, ".gz")) {
+        if (program_fpga_from_gz_file_path(path)) {
+            method = FPGA_METHOD_SD_GZIP;
+        }
+    } else if (ends_with_casefold(path, ".bin")) {
+        if (program_fpga_from_file_path(path)) {
+            method = FPGA_METHOD_SD_RAW;
+        }
+    } else {
+        printf("Selected SD image has unsupported extension: %s\n", path);
+    }
+    if (method != FPGA_METHOD_NONE) {
+        boot_runtime_set(slot, BootSource::Sd, path);
+    }
+    return method;
+}
+
+fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info, uint8_t slot)
 {
     char update_path[256];
     char fallback_path[256];
@@ -771,45 +834,40 @@ fpga_method_t program_fpga_from_sd_card(const fpga_image_info_t* info)
 
     printf("FPGA image base path: %s, update file: %s\n",
            info->base_path, info->update_filename);
-    if (program_fpga_from_file_path(update_path)) {
-        return FPGA_METHOD_SD_RAW;
+    fpga_method_t method = program_fpga_from_sd_path(update_path, slot);
+    if (method != FPGA_METHOD_NONE) {
+        return method;
     }
-    printf("Searching %s for Wildbits*.{lz4,gz,bin}\n", info->base_path);
-
-    if (find_wildbits_image(info->base_path, ".lz4", wildbits_path, sizeof(wildbits_path))) {
-        printf("Selected Wildbits LZ4 image: %s\n", wildbits_path);
-        if (program_fpga_from_lz4_file_path(wildbits_path)) {
-            return FPGA_METHOD_SD_LZ4;
-        }
-        printf("Wildbits LZ4 failed, continuing fallback\n");
-    }
+    printf("Searching %s for Wildbits*.{gz,bin}\n", info->base_path);
 
     if (find_wildbits_image(info->base_path, ".gz", wildbits_path, sizeof(wildbits_path))) {
         printf("Selected Wildbits gzip image: %s\n", wildbits_path);
-        if (program_fpga_from_gz_file_path(wildbits_path)) {
-            return FPGA_METHOD_SD_GZIP;
+        method = program_fpga_from_sd_path(wildbits_path, slot);
+        if (method != FPGA_METHOD_NONE) {
+            return method;
         }
         printf("Wildbits gzip failed, continuing fallback\n");
     }
 
     if (find_wildbits_image(info->base_path, ".bin", wildbits_path, sizeof(wildbits_path))) {
         printf("Selected Wildbits raw image: %s\n", wildbits_path);
-        if (program_fpga_from_file_path(wildbits_path)) {
-            return FPGA_METHOD_SD_RAW;
+        method = program_fpga_from_sd_path(wildbits_path, slot);
+        if (method != FPGA_METHOD_NONE) {
+            return method;
         }
         printf("Wildbits raw failed, continuing fallback\n");
     }
 
-    printf("Trying legacy names (.lz4 -> .gz -> .bin) from %s\n", fallback_path);
-    if (program_fpga_from_lz4_file(fallback_path)) {
-        return FPGA_METHOD_SD_LZ4;
-    }
-
+    printf("Trying legacy names (.gz -> .bin) from %s\n", fallback_path);
     if (program_fpga_from_gz_file(fallback_path)) {
+        char gzip_path[260];
+        snprintf(gzip_path, sizeof(gzip_path), "%s.gz", fallback_path);
+        boot_runtime_set(slot, BootSource::Sd, gzip_path);
         return FPGA_METHOD_SD_GZIP;
     }
 
     if (program_fpga_from_file_path(fallback_path)) {
+        boot_runtime_set(slot, BootSource::Sd, fallback_path);
         return FPGA_METHOD_SD_RAW;
     }
 
@@ -823,10 +881,16 @@ fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_
         return FPGA_METHOD_NONE;
     }
 
-    printf("Programming from flash (lz4 slot %u)\n", (unsigned)(slot));
+    printf("Programming from flash (gzip slot %u)\n", (unsigned)(slot));
     const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
-    if (program_fpga_from_lz4_data(data, FPGA_FLASH_SLOT_SIZE)) {
-        return FPGA_METHOD_FLASH_LZ4;
+    if (program_fpga_from_gz_data(data, FPGA_FLASH_SLOT_SIZE, true)) {
+        FlashSlotInfo flash = boot_config_flash_slot(slot);
+        char fallback_label[32];
+        snprintf(fallback_label, sizeof(fallback_label), "flash slot %u",
+                 static_cast<unsigned>(slot + 1));
+        boot_runtime_set(slot, BootSource::Flash,
+                         flash.valid && flash.label[0] ? flash.label : fallback_label);
+        return FPGA_METHOD_FLASH_GZIP;
     }
     return FPGA_METHOD_NONE;
 }
@@ -844,134 +908,111 @@ fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice)
     }
     printf("Programming embedded golden context %u (%u bytes)\n",
            source_context, static_cast<unsigned int>(length));
-    if (program_fpga_from_lz4_data(image->start, length)) {
-        return FPGA_METHOD_GOLDEN_LZ4;
+    if (program_fpga_from_gz_data(image->start, length, false)) {
+        char label[40];
+        snprintf(label, sizeof(label), "embedded golden context %u",
+                 source_context);
+        boot_runtime_set(slot, BootSource::Golden, label);
+        return FPGA_METHOD_GOLDEN_GZIP;
     }
     return FPGA_METHOD_NONE;
 }
 
-bool gzip_skip_header(FIL* fil, uint8_t* in_buf, UINT* in_len, UINT* in_pos)
+fpga_method_t program_selected_context(uint8_t slot, bool sd_mounted,
+                                       bool force_golden)
 {
-    auto read_byte = [&](uint8_t* out) -> bool {
-        if (*in_pos >= *in_len) {
-            UINT br = 0;
-            FRESULT fr = f_read(fil, in_buf, GZ_IN_BUF_SIZE, &br);
-            if (fr != FR_OK || br == 0) {
-                return false;
-            }
-            *in_len = br;
-            *in_pos = 0;
-        }
-        *out = in_buf[(*in_pos)++];
-        return true;
-    };
-
-    uint8_t hdr[10];
-    for (size_t i = 0; i < sizeof(hdr); i++) {
-        if (!read_byte(&hdr[i])) {
-            return false;
-        }
+    if (slot >= std::size(fpga_images)) {
+        return FPGA_METHOD_NONE;
+    }
+    if (force_golden) {
+        printf("RESET held during startup: forcing golden image\n");
+        return program_fpga_from_golden_slot(slot);
     }
 
-    if (hdr[0] != 0x1f || hdr[1] != 0x8b || hdr[2] != 8) {
-        return false;
+    const fpga_image_info_t* info = &fpga_images[slot];
+    const BootSelection& selection = boot_config_selection(slot);
+    fpga_method_t method = FPGA_METHOD_NONE;
+    printf("Boot selection for context %u: source %u%s%s\n",
+           static_cast<unsigned>(slot + 1),
+           static_cast<unsigned>(selection.source),
+           selection.source == BootSource::Sd ? ", path " : "",
+           selection.source == BootSource::Sd ? selection.path : "");
+
+    switch (selection.source) {
+    case BootSource::Sd:
+        if (sd_mounted) {
+            method = program_fpga_from_sd_path(selection.path, slot);
+        }
+        if (method == FPGA_METHOD_NONE) {
+            printf("Selected SD image failed; trying flash slot\n");
+            method = program_fpga_from_flash_slot(info, slot);
+        }
+        break;
+    case BootSource::Flash:
+        method = program_fpga_from_flash_slot(info, slot);
+        if (method == FPGA_METHOD_NONE && sd_mounted) {
+            printf("Selected flash image failed; trying automatic SD image\n");
+            method = program_fpga_from_sd_card(info, slot);
+        }
+        break;
+    case BootSource::Golden:
+        return program_fpga_from_golden_slot(slot);
+    case BootSource::Auto:
+    default:
+        if (sd_mounted) {
+            method = program_fpga_from_sd_card(info, slot);
+        }
+        if (method == FPGA_METHOD_NONE) {
+            printf("No usable automatic SD image; trying flash slot\n");
+            method = program_fpga_from_flash_slot(info, slot);
+        }
+        break;
     }
 
-    uint8_t flg = hdr[3];
-    if (flg & 0x04) {
-        uint8_t b0 = 0, b1 = 0;
-        if (!read_byte(&b0) || !read_byte(&b1)) {
-            return false;
-        }
-        uint16_t xlen = (uint16_t)b0 | ((uint16_t)b1 << 8);
-        for (uint16_t i = 0; i < xlen; i++) {
-            uint8_t tmp = 0;
-            if (!read_byte(&tmp)) {
-                return false;
-            }
-        }
+    if (method == FPGA_METHOD_NONE) {
+        printf("Selected image and fallbacks failed; trying golden slot %u\n",
+               static_cast<unsigned>(slot + 1));
+        method = program_fpga_from_golden_slot(slot);
     }
-    if (flg & 0x08) {
-        uint8_t c = 0;
-        do {
-            if (!read_byte(&c)) {
-                return false;
-            }
-        }
-        while (c != 0);
-    }
-    if (flg & 0x10) {
-        uint8_t c = 0;
-        do {
-            if (!read_byte(&c)) {
-                return false;
-            }
-        }
-        while (c != 0);
-    }
-    if (flg & 0x02) {
-        uint8_t tmp = 0;
-        if (!read_byte(&tmp) || !read_byte(&tmp)) {
-            return false;
-        }
-    }
-
-    return true;
+    return method;
 }
 
-bool fil_read_exact(FIL* fil, void* dst, UINT len)
-{
-    UINT total = 0;
-    uint8_t* out = static_cast<uint8_t*>(dst);
-    while (total < len) {
-        UINT br = 0;
-        FRESULT fr = f_read(fil, out + total, len - total, &br);
-        if (fr != FR_OK || br == 0) {
-            return false;
-        }
-        total += br;
-    }
-    return true;
-}
-
-bool program_fpga_from_file(FIL fil)
+bool program_fpga_from_file(FIL* fil)
 {
     UINT j = 0;
     FRESULT fr = FR_OK;
+    uint32_t total = 0;
 
     // multicore_launch_core1(f256k2_prg_block_fpga);    // Get the Second Core Going
 
     // printf("The Core1 is Started and the Code is: %X\n", MailBox);
-    f256k2_init_prg_fpga();
+    if (!f256k2_init_prg_fpga()) {
+        return false;
+    }
     for (;;) {
-        fr = f_read(&fil, Buffer0, BUFFER_SIZE, &j);      // J = how many were read
+        fr = f_read(fil, Buffer0, BUFFER_SIZE, &j);      // J = how many were read
         if (fr != FR_OK) {
             return false;
         }
         if (j == 0) {
             break;
         }
-        // printf("Block #: %d Byte Read: %d\n", BlockCount++, j);
-        f256k2_prg_block_fpga(Buffer0, j);
-        if (j < BUFFER_SIZE) {
-            break;
+        if (j > FPGA_SIZE - total) {
+            printf("Raw FPGA image is too large\n");
+            return false;
         }
+        // printf("Block #: %d Byte Read: %d\n", BlockCount++, j);
+        if (!f256k2_prg_block_fpga(Buffer0, j)) {
+            return false;
+        }
+        total += j;
     }
 
-    // Every block, including the final partial block, was sent in the loop.
-    // gpio_put(FPGA_CONFIG_CSn,1);          // Bring Down the ChipSelect
-#if USE_PIO_FPGA
-    fpga_pio_begin();
-    fpga_pio_enable(false);
-#endif
-    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
-    for (unsigned int k = 0; k < 100; k++) {
-        gpio_put(FPGA_CONFIG_CCLK, 0);        // Bring Down the Clock
-        gpio_put(FPGA_CONFIG_CCLK, 1);        // Bring Up the Clock
+    if (total != FPGA_SIZE) {
+        printf("Raw FPGA image size mismatch: %u\n", (unsigned)total);
+        return false;
     }
-    gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_IN);
-
-    return true;
+    return finish_fpga_programming();
 }
 
 // This could have been done with a loop but for the sake of simplicity, I am numerating
@@ -1043,7 +1084,7 @@ static inline void f256k2_Set_FPGA_Data_Port(unsigned char value)
     sio_hw->gpio_set = set_mask;
 }
 
-void f256k2_init_prg_fpga(void)
+bool f256k2_init_prg_fpga(void)
 {
 #if USE_PIO_FPGA
     fpga_pio_begin();
@@ -1052,30 +1093,32 @@ void f256k2_init_prg_fpga(void)
     // Bring Down Program
     gpio_put(FPGA_CONFIG_PRG, 0);
     printf("Programn is Low\n");
-    do {
-        gpio_put(FPGA_CONFIG_CCLK, 0);          // Bring Down the Clock
-        gpio_put(FPGA_CONFIG_CCLK, 1);          // Bring Up the Clock
+    if (!wait_for_fpga_init(false)) {
+        gpio_put(FPGA_CONFIG_PRG, 1);
+        printf("FPGA configuration failed: INITn did not go low\n");
+        return false;
     }
-    while (gpio_get(FPGA_CONFIG_INITn));        // Wait Till it gets down
     printf("Initn is Low\n");
     gpio_put(FPGA_CONFIG_PRG, 1);
     printf("Programn is High\n");
-    do {
-        gpio_put(FPGA_CONFIG_CCLK, 0);          // Bring Down the Clock
-        gpio_put(FPGA_CONFIG_CCLK, 1);          // Bring Up the Clock
+    if (!wait_for_fpga_init(true)) {
+        printf("FPGA configuration failed: INITn did not return high\n");
+        return false;
     }
-    while (gpio_get(FPGA_CONFIG_INITn) == 0);   // Wait Till it gets up
     printf("Initn is Hi\n");
-    gpio_put(FPGA_CONFIG_CCLK, 0);              // Bring Down the Clock
-    gpio_put(FPGA_CONFIG_CCLK, 1);              // Bring Up the Clock
+    pulse_fpga_config_clock();
     // gpio_put(FPGA_CONFIG_CSn, 0);               // Bring Down the ChipSelect
+    return true;
 }
 
-void f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len)
+bool f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len)
 {
     // printf("Programming chunk %d bytes\n", len);
-    if (!ptr || len == 0) {
-        return;
+    if (!ptr) {
+        return false;
+    }
+    if (len == 0) {
+        return true;
     }
 
 #if USE_PIO_FPGA
@@ -1103,4 +1146,9 @@ void f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len)
         sio_hw->gpio_set = FPGA_CCLK_MASK;     // Write strobe high
     }
 #endif
+    if (!gpio_get(FPGA_CONFIG_INITn)) {
+        printf("FPGA configuration failed: INITn went low while streaming\n");
+        return false;
+    }
+    return true;
 }
