@@ -7,9 +7,19 @@ set default-list
 [private]
 [working-directory('build')]
 @build-target target: prepare
-    cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release
     cmake --build . --target {{target}}
 
 @build: (build-target "fpga_mgr")
 @build-with-fpga-load: (build-target "fpga_mgr_with_fpga_uf2")
+
+@build-k2-uploader:
+    make -C k2
+
+@run-k2-uploader:
+    make -C k2 pgz
+    foenixmgr --target f256k run-pgz k2/k2uploader.pgz
+
+@run-k2-core-manager:
+    make -C k2 core-manager
+    foenixmgr --target f256k run-pgz k2/k2coremgr.pgz

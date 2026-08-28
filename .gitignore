@@ -12,5 +12,12 @@ build_*/
 .DS_Store
 fpga/*.bin
 fpga/*.gz
-fpga/*.lz4
+!fpga/context1.gz
+!fpga/context3.gz
+!fpga/context4.gz
+k2/*.bin
+k2/*.pgz
+k2/*.lst
+foenixmgr.ini
 *.xlsx
+/*.bin
