@@ -19,6 +19,10 @@ The manager starts in the RP2040 core catalog for the currently running
 context. `Tab` switches between that catalog and a browser for the K2's local
 65816/MicroKernel SD card.
 
+If the running FPGA core does not expose an online RP2040 supervisor mailbox,
+the manager reports that the supervisor is offline. Pressing any key at that
+prompt restarts the K2 through the TinyVicky host-reset registers.
+
 Keys available in both views:
 
 | Key | Action |

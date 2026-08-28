@@ -25,7 +25,7 @@ constexpr size_t kFrameSize = 256;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kMaxPayload = kFrameSize - kHeaderSize;
 constexpr uint8_t kFirmwareMajor = 1;
-constexpr uint8_t kFirmwareMinor = 12;
+constexpr uint8_t kFirmwareMinor = 13;
 
 constexpr uint kMisoPin = 0;
 constexpr uint kCsPin = 1;
@@ -269,6 +269,26 @@ bool valid_image_basename(const char* name)
         return false;
     }
     return ends_with_casefold(name, ".gz") || ends_with_casefold(name, ".bin");
+}
+
+bool ensure_context_directory(uint8_t context)
+{
+    if (context >= kBootContextCount) {
+        return false;
+    }
+    char directory[16];
+    const int length = std::snprintf(
+        directory, sizeof(directory), "0:/CNTX%u",
+        static_cast<unsigned>(context + 1));
+    if (length <= 0 || length >= static_cast<int>(sizeof(directory))) {
+        return false;
+    }
+    const FRESULT result = f_mkdir(directory);
+    if (result == FR_OK) {
+        std::printf("Created manager SD directory: %s\n", directory);
+        return true;
+    }
+    return result == FR_EXIST;
 }
 
 bool prepare_named_upload_paths(uint8_t context, const char* name)
@@ -693,6 +713,10 @@ bool begin_upload(const uint8_t* payload, size_t length)
             last_error = kErrorBadTarget;
             return false;
         }
+        if (!ensure_context_directory(upload_slot)) {
+            last_error = kErrorFileOpen;
+            return false;
+        }
         char temporary[96];
         std::snprintf(temporary, sizeof(temporary), "%s.upload", kImagePaths[upload_slot]);
         if (f_open(&upload_file, temporary, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
@@ -715,6 +739,10 @@ bool begin_upload(const uint8_t* payload, size_t length)
              (upload_expected_size < 18 ||
               upload_expected_size > kMaxSdGzipSize))) {
             last_error = kErrorSize;
+            return false;
+        }
+        if (!ensure_context_directory(upload_slot)) {
+            last_error = kErrorFileOpen;
             return false;
         }
         f_unlink(upload_temporary);

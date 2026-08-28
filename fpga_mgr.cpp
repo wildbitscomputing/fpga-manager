@@ -114,6 +114,22 @@ static const fpga_image_info_t fpga_images[] = {
     { "CNTX4", "context4.bin", "foenix138.bin", FPGA_FLASH_GZIP_BASE3 },
 };
 
+static void ensure_manager_sd_context_directories()
+{
+    for (const fpga_image_info_t& image : fpga_images) {
+        const FRESULT result = f_mkdir(image.base_path);
+        if (result == FR_OK) {
+            printf("Created manager SD directory: %s\n", image.base_path);
+            boot_logf("Created SD directory: %s", image.base_path);
+        } else if (result != FR_EXIST) {
+            printf("Manager SD directory unavailable: %s (FatFs %u)\n",
+                   image.base_path, static_cast<unsigned>(result));
+            boot_logf("SD directory failed: %s (%u)", image.base_path,
+                      static_cast<unsigned>(result));
+        }
+    }
+}
+
 typedef enum {
     FPGA_METHOD_NONE = 0,
     FPGA_METHOD_SD_GZIP,
@@ -408,6 +424,7 @@ int main()
     bool sd_mounted = (fr == FR_OK);
     if (sd_mounted) {
         boot_logf("Manager SD mounted");
+        ensure_manager_sd_context_directories();
     } else {
         boot_logf("Manager SD mount failed: %u", static_cast<unsigned>(fr));
     }

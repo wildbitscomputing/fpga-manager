@@ -235,13 +235,6 @@ RUN:
             .xs
             cld
 
-            ldx     #7
-save_zp:    lda     $20,x
-            sta     saved_zp,x
-            dex
-            bpl     save_zp
-            lda     MMU_IO_CTRL
-            sta     saved_io_page
             stz     MMU_IO_CTRL
             lda     #<event_buffer
             sta     KARGS_EVENT_DEST
@@ -286,6 +279,8 @@ save_zp:    lda     $20,x
             jmp     supervisor_offline
 supervisor_online:
             lda     MAILBOX_VERSION
+            cmp     #$ff
+            beq     supervisor_offline
             cmp     #1
             beq     supervisor_version_ok
             jmp     supervisor_version
@@ -1049,15 +1044,8 @@ exit_program:
             lda     #<exit_text
             ldx     #>exit_text
             jsr     draw_status
-            lda     saved_io_page
-            sta     MMU_IO_CTRL
-            ldx     #7
-restore_zp: lda     saved_zp,x
-            sta     $20,x
-            dex
-            bpl     restore_zp
-exit_wait:  jsr     KERNEL_YIELD
-            bra     exit_wait
+            jsr     wait_key
+            jmp     restart_computer
             .endif
 
 ; ---------------------------------------------------------------------------
@@ -4743,7 +4731,7 @@ running_text:       .text "Running: context ",0
 offline_text:       .text "RP2040 supervisor is offline.",$0a,0
 version_text:       .text "Unsupported supervisor version $",0
 error_text:         .text "Supervisor command failed, error",0
-exit_text:          .text "Reset the K2 to return to DOS.",0
+exit_text:          .text "Press any key to reset the system.",0
 ui_title_text:      .text "Core Catalog",0
 ui_local_title_text:.text "Local SD Browser",0
 ui_help_title_text: .text "Keyboard Help",0
@@ -4856,10 +4844,8 @@ tx_buffer:          .fill 240,0
             .align $100
 response_buffer:    .fill 240,0
 event_buffer:       .fill 16,0
-saved_zp:           .fill 8,0
 catalog_generation: .fill 4,0
 nonce:              .fill 4,0
-saved_io_page:      .byte 0
 context:            .byte 0
 catalog_count:      .byte 0
 catalog_index:      .byte 0

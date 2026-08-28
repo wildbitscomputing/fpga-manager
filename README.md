@@ -28,7 +28,7 @@ The CPU-visible register map and wire protocol are documented in
 
 ### Supervisor command overview
 
-The current wire protocol is version 1 and supervisor firmware is version 1.12.
+The current wire protocol is version 1 and supervisor firmware is version 1.13.
 Command payloads are at most 240 bytes; contexts in the protocol are zero-based
 (`0`–`3`). Multi-byte values are little-endian. The FPGA-side mailbox
 specification named above is authoritative for exact request/response layouts,
@@ -80,6 +80,11 @@ switch determines which of the following directories is selected as a base path:
 - `CNTX2/`
 - `CNTX3/`
 - `CNTX4/`
+
+After mounting a writable card, the manager creates any missing context
+directories automatically. A freshly formatted FAT card therefore needs no
+manual folder setup. Named uploads also create their destination context
+directory lazily in case it was removed while the supervisor was running.
 
 Within the base directory, the loader first checks the context-named runtime
 update (`context1.bin` through `context4.bin`). It then looks for
@@ -253,6 +258,11 @@ context differs from the context selected by the physical DIP switches. The
 catalog, SD contents, flash slot, and saved default of another context can
 still be maintained, but changing context requires setting the switches and
 restarting the machine.
+
+Supervisor firmware 1.13 automatically provisions missing `CNTX1` through
+`CNTX4` directories on a mounted manager SD card and retries directory creation
+before SD uploads. Boot fallback remains available if the card is absent,
+read-only, or otherwise cannot be provisioned.
 
 ## Build
 
