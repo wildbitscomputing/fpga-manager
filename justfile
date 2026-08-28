@@ -18,6 +18,12 @@ set default-list
 @build-k2-uploader:
     make -C k2
 
+@build-k2-core-manager:
+    make -C k2 core-manager
+
+@package-release: build build-k2-core-manager
+    python3 tools/package_release.py --build-dir build
+
 @run-k2-uploader:
     make -C k2 pgz
     foenixmgr --target f256k run-pgz k2/k2uploader.pgz

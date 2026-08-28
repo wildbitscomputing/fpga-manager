@@ -318,6 +318,17 @@ The plain UF2/ELF contains the supervisor and its board-specific immutable
 golden images. The `_with_fpga` UF2 additionally preloads the corresponding
 replaceable flash slots.
 
+Build the self-contained end-user ZIP, including the board-specific UF2/ELF
+files, K2 utility, quick-start guide, detailed documentation, and license with:
+
+```sh
+just package-release
+```
+
+The package is written to `build/release/fpga-manager-<version>.zip`. Its
+`README.md` is sourced from `release/README.md`; this full project document is
+included as `TECHNICAL.md`.
+
 ## Combined UF2 with FPGA images
 
 If `picotool` and Python 3 are available, CMake exposes a target that bundles
