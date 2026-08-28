@@ -1,0 +1,7 @@
+#pragma once
+
+// Generated from the CMake project version. Keep protocol and UF2 metadata in
+// sync by changing only project(... VERSION ...) in CMakeLists.txt.
+#define FPGA_MANAGER_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define FPGA_MANAGER_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define FPGA_MANAGER_VERSION_STRING "@PROJECT_VERSION@"

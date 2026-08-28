@@ -31,7 +31,16 @@ set(CMAKE_CXX_STANDARD 17)
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(fpga_mgr C CXX ASM)
+project(fpga_mgr VERSION 1.13 LANGUAGES C CXX ASM)
+
+if(PROJECT_VERSION_MAJOR GREATER 255 OR PROJECT_VERSION_MINOR GREATER 255)
+    message(FATAL_ERROR "Supervisor protocol version components must fit in one byte")
+endif()
+configure_file(
+    ${CMAKE_CURRENT_LIST_DIR}/fpga_manager_version.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/fpga_manager_version.h
+    @ONLY
+)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -104,7 +113,7 @@ endif()
 
 add_subdirectory(FatFs_SPI build)
 
-# Add executable. Default name is the project name, version 0.1
+# Add executable.
 add_executable(fpga_mgr
     boot_config.cpp
     boot_log.cpp
@@ -214,12 +223,12 @@ else()
 endif()
 #pico_set_binary_type(fpga_mgr no_flash)
 pico_set_program_name(fpga_mgr "fpga_mgr")
-pico_set_program_version(fpga_mgr "0.1")
+pico_set_program_version(fpga_mgr "${PROJECT_VERSION}")
 
 # Choose source and destination for standard input and output:
 #   See 4.1. Serial input and output on Raspberry Pi Pico in Getting started with Raspberry Pi Pico (https://datasheets.raspberrypi.org/pico/getting-started-with-pico.pdf)
 #   and 2.7.1. Standard Input/Output (stdio) Support in Raspberry Pi Pico C/C++ SDK (https://datasheets.raspberrypi.org/pico/raspberry-pi-pico-c-sdk.pdf):
-option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" ON)
+option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" OFF)
 if(FPGA_MGR_UART_DEBUG)
     target_compile_definitions(fpga_mgr PRIVATE
         PICO_DEFAULT_UART=1
@@ -234,4 +243,7 @@ endif()
 pico_enable_stdio_usb(fpga_mgr 1)
 pico_add_extra_outputs(fpga_mgr)
 
-target_include_directories(fpga_mgr PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(fpga_mgr PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)

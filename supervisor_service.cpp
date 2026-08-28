@@ -6,6 +6,7 @@
 #include "boot_config.h"
 #include "boot_log.h"
 #include "ff.h"
+#include "fpga_manager_version.h"
 #include "golden_images.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
@@ -24,8 +25,8 @@ constexpr uint8_t kProtocolVersion = 1;
 constexpr size_t kFrameSize = 256;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kMaxPayload = kFrameSize - kHeaderSize;
-constexpr uint8_t kFirmwareMajor = 1;
-constexpr uint8_t kFirmwareMinor = 13;
+constexpr uint8_t kFirmwareMajor = FPGA_MANAGER_VERSION_MAJOR;
+constexpr uint8_t kFirmwareMinor = FPGA_MANAGER_VERSION_MINOR;
 
 constexpr uint kMisoPin = 0;
 constexpr uint kCsPin = 1;

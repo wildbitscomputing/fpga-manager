@@ -66,10 +66,10 @@ IMAGE_BEGIN targets are legacy context-named raw SD (`0`), retired (`1`),
 replaceable flash gzip (`2`), and named manager-SD install (`3`). Boot sources
 are AUTO (`0`), exact SD (`1`), FLASH (`2`), and GOLDEN (`3`).
 
-Manager boot diagnostics are mirrored at 115200 8N1 on FTDI interface 1,
-normally `/dev/ttyUSB1`. FoenixMgr uses the separate FTDI interface 2,
-normally `/dev/ttyUSB2`. Configure with `-DFPGA_MGR_UART_DEBUG=OFF` to disable
-the manager UART output while retaining USB stdio.
+Manager boot diagnostics use USB stdio by default. FoenixMgr uses FTDI
+interface 2, normally `/dev/ttyUSB2`. Configure with
+`-DFPGA_MGR_UART_DEBUG=ON` to additionally mirror diagnostics at 115200 8N1 on
+FTDI interface 1, normally `/dev/ttyUSB1`.
 
 ## SD card layout
 
@@ -289,6 +289,11 @@ or simply
 ```sh
 just build
 ```
+
+The version in `project(fpga_mgr VERSION ...)` is the single source of truth
+for both the UF2 binary metadata and the major/minor supervisor version exposed
+through the mailbox protocol. Release builds disable FTDI UART logging by
+default while retaining USB stdio.
 
 Artifacts (in `build/`):
 
