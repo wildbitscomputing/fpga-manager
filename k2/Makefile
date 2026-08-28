@@ -27,8 +27,8 @@ $(PGZ_APP): $(SOURCE)
 	$(TASS) --quiet --c256-pgz --output-exec=RUN -D PGZ_BUILD=1 \
 		-L $(PGZ_LISTING) -o $@ $<
 
-$(CORE_MGR_APP): $(CORE_MGR_SOURCE)
-	$(TASS) --quiet --c256-pgz --output-exec=RUN \
+$(CORE_MGR_APP): $(CORE_MGR_SOURCE) fpga_manager_logo_80x5.inc
+	$(TASS) --quiet --long-branch --c256-pgz --output-exec=RUN \
 		-L k2coremgr.lst -o $@ $<
 
 clean:

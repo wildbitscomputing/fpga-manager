@@ -38,14 +38,55 @@ pico_sdk_init()
 
 # Golden images are linked into the manager below the mutable 8 MiB slot bank.
 # Context 2 has no core yet, so recovery for it deliberately uses context 1.
-set(GOLDEN_CONTEXT1 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.gz CACHE FILEPATH "Golden context 1 gzip image")
-set(GOLDEN_CONTEXT3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.gz CACHE FILEPATH "Golden context 3 gzip image")
-set(GOLDEN_CONTEXT4 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.gz CACHE FILEPATH "Golden context 4 gzip image")
+set(GOLDEN_CONTEXT1_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.gz)
+set(GOLDEN_CONTEXT3_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.gz)
+set(GOLDEN_CONTEXT4_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.gz)
+set(GOLDEN_CONTEXT1 ${GOLDEN_CONTEXT1_DEFAULT} CACHE FILEPATH "Golden context 1 gzip image")
+set(GOLDEN_CONTEXT3 ${GOLDEN_CONTEXT3_DEFAULT} CACHE FILEPATH "Golden context 3 gzip image")
+set(GOLDEN_CONTEXT4 ${GOLDEN_CONTEXT4_DEFAULT} CACHE FILEPATH "Golden context 4 gzip image")
+set(GOLDEN_CONTEXT1_LABEL "" CACHE STRING "Golden context 1 display name (empty uses filename)")
+set(GOLDEN_CONTEXT3_LABEL "" CACHE STRING "Golden context 3 display name (empty uses filename)")
+set(GOLDEN_CONTEXT4_LABEL "" CACHE STRING "Golden context 4 display name (empty uses filename)")
+set(GOLDEN_CONTEXT1_DEFAULT_LABEL "CFP95600C.bin.gz")
+set(GOLDEN_CONTEXT3_DEFAULT_LABEL "Wildbits_k2_6809_int_wizfi_turbo_v5_20260827.bin.gz")
+set(GOLDEN_CONTEXT4_DEFAULT_LABEL "WildbitsK2_2x_B0C_02020103_20260827.bin.gz")
 foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
     if(NOT EXISTS "${${GOLDEN_IMAGE}}")
         message(FATAL_ERROR "Missing required recovery image: ${${GOLDEN_IMAGE}}")
     endif()
     file(TO_CMAKE_PATH "${${GOLDEN_IMAGE}}" ${GOLDEN_IMAGE})
+endforeach()
+foreach(GOLDEN_CONTEXT IN ITEMS 1 3 4)
+    if(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_LABEL STREQUAL "")
+        if(GOLDEN_CONTEXT${GOLDEN_CONTEXT} STREQUAL
+           GOLDEN_CONTEXT${GOLDEN_CONTEXT}_DEFAULT)
+            set(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
+                "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_DEFAULT_LABEL}")
+        else()
+            get_filename_component(
+                GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
+                "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}}" NAME
+            )
+        endif()
+    else()
+        set(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
+            "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_LABEL}")
+    endif()
+    string(LENGTH "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL}"
+           GOLDEN_CONTEXT_LABEL_LENGTH)
+    if(GOLDEN_CONTEXT_LABEL_LENGTH GREATER 191)
+        message(FATAL_ERROR
+            "Golden context ${GOLDEN_CONTEXT} display name exceeds 191 characters")
+    endif()
+    if(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL MATCHES "[\r\n]")
+        message(FATAL_ERROR
+            "Golden context ${GOLDEN_CONTEXT} display name contains a newline")
+    endif()
+    # Quote the label for use as an assembler string literal.
+    string(REPLACE "\\" "\\\\" GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
+           "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL}")
+    string(REPLACE "\"" "\\\"" GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
+           "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL}")
 endforeach()
 configure_file(golden_images.S.in ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S @ONLY)
 set_property(SOURCE ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S APPEND PROPERTY
@@ -66,7 +107,9 @@ add_subdirectory(FatFs_SPI build)
 # Add executable. Default name is the project name, version 0.1
 add_executable(fpga_mgr
     boot_config.cpp
+    boot_log.cpp
     fpga_mgr.cpp
+    golden_images.cpp
     hw_config.c
     miniz.c
     miniz_tinfl.c

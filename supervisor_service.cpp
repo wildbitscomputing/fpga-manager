@@ -4,7 +4,9 @@
 #include <cstring>
 
 #include "boot_config.h"
+#include "boot_log.h"
 #include "ff.h"
+#include "golden_images.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
 #include "hardware/flash.h"
@@ -23,7 +25,7 @@ constexpr size_t kFrameSize = 256;
 constexpr size_t kHeaderSize = 16;
 constexpr size_t kMaxPayload = kFrameSize - kHeaderSize;
 constexpr uint8_t kFirmwareMajor = 1;
-constexpr uint8_t kFirmwareMinor = 4;
+constexpr uint8_t kFirmwareMinor = 12;
 
 constexpr uint kMisoPin = 0;
 constexpr uint kCsPin = 1;
@@ -45,11 +47,26 @@ constexpr uint8_t kCommandSetSelection = 0x0b;
 constexpr uint8_t kCommandReconfigureSelected = 0x0c;
 constexpr uint8_t kCommandClearFlash = 0x0d;
 constexpr uint8_t kCommandGetBootStatus = 0x0e;
+constexpr uint8_t kCommandCopySdToFlash = 0x0f;
+constexpr uint8_t kCommandGetBootLog = 0x10;
+constexpr uint8_t kCommandCopySdToFlashBegin = 0x11;
+constexpr uint8_t kCommandCopySdToFlashStep = 0x12;
+constexpr uint8_t kCommandDeleteSdImage = 0x13;
+constexpr uint8_t kCommandReconfigureOnce = 0x14;
+constexpr uint8_t kCommandRestartSupervisor = 0x15;
+constexpr uint8_t kCommandReadSdBegin = 0x16;
+constexpr uint8_t kCommandReadSdData = 0x17;
+constexpr uint8_t kCommandReadSdEnd = 0x18;
 
 constexpr uint8_t kTargetSdRaw = 0;
 constexpr uint8_t kTargetFlashGzip = 2;
+constexpr uint8_t kTargetSdNamed = 3;
 constexpr uint32_t kFpgaImageSize = 9730652u;
 constexpr uint32_t kFlashSlotSize = 2u * 1024u * 1024u;
+constexpr uint32_t kCopyEraseStep = 64u * 1024u;
+constexpr unsigned kCopyBlocksPerStep = 8;
+constexpr size_t kReadSdChunkSize = kMaxPayload - 8;
+constexpr uint32_t kMaxSdGzipSize = kFpgaImageSize + 64u * 1024u;
 constexpr uintptr_t kXipBase = 0x10000000u;
 constexpr uint32_t kMutableFlashStart = 8u * 1024u * 1024u;
 constexpr uint32_t kMutableFlashEnd = 16u * 1024u * 1024u;
@@ -87,12 +104,27 @@ enum Error : uint8_t {
     kErrorCatalog = 0x20,
     kErrorStaleCatalog = 0x21,
     kErrorBadSelection = 0x22,
+    kErrorCopyRead = 0x23,
+    kErrorBootLog = 0x24,
+    kErrorDelete = 0x25,
+    kErrorNoRead = 0x26,
+    kErrorReadPosition = 0x27,
+    kErrorContextMismatch = 0x28,
 };
 
 enum ImageFormat : uint8_t {
     kFormatNone = 0,
     kFormatRaw = 1,
     kFormatGzip = 2,
+};
+
+enum CopyState : uint8_t {
+    kCopyIdle = 0,
+    kCopyErasing = 1,
+    kCopyWriting = 2,
+    kCopyFinalizing = 3,
+    kCopyDone = 4,
+    kCopyFailed = 5,
 };
 
 constexpr uint8_t kCatalogFlagSelected = 0x01;
@@ -118,6 +150,7 @@ uint32_t tx_words[kFrameSize];
 uint32_t rx_words[kFrameSize];
 
 bool sd_available = false;
+uint8_t physical_context = 0;
 bool upload_active = false;
 uint8_t upload_target = 0;
 uint8_t upload_slot = 0;
@@ -137,6 +170,24 @@ size_t upload_header_used = 0;
 uint8_t upload_tail[8];
 uint8_t last_error = kErrorNone;
 char upload_label[kFlashLabelLength];
+char upload_destination[kBootPathLength];
+char upload_temporary[kBootPathLength];
+char upload_backup[kBootPathLength];
+uint8_t copy_buffer[1024];
+FIL copy_source;
+bool copy_source_open = false;
+FIL sd_read_source;
+bool sd_read_source_open = false;
+uint32_t sd_read_size = 0;
+uint32_t sd_read_offset = 0;
+mz_ulong sd_read_crc = MZ_CRC32_INIT;
+uint8_t sd_read_cache[kReadSdChunkSize];
+uint32_t sd_read_cache_offset = 0;
+uint8_t sd_read_cache_count = 0;
+bool sd_read_cache_valid = false;
+CopyState copy_state = kCopyIdle;
+uint8_t copy_error = kErrorNone;
+uint32_t copy_erase_offset = 0;
 CatalogEntry catalog[kCatalogCapacity];
 uint16_t catalog_count = 0;
 uint8_t catalog_context = 0;
@@ -208,6 +259,36 @@ bool strings_equal_casefold(const char* a, const char* b)
         }
     }
     return *a == *b;
+}
+
+bool valid_image_basename(const char* name)
+{
+    if (!name || !name[0] || name[0] == '.' || std::strstr(name, "..") ||
+        std::strchr(name, '/') || std::strchr(name, '\\') ||
+        std::strchr(name, ':')) {
+        return false;
+    }
+    return ends_with_casefold(name, ".gz") || ends_with_casefold(name, ".bin");
+}
+
+bool prepare_named_upload_paths(uint8_t context, const char* name)
+{
+    if (context >= kBootContextCount || !valid_image_basename(name)) {
+        return false;
+    }
+    const int destination_length = std::snprintf(
+        upload_destination, sizeof(upload_destination), "0:/CNTX%u/%s",
+        static_cast<unsigned>(context + 1), name);
+    const int temporary_length = std::snprintf(
+        upload_temporary, sizeof(upload_temporary), "0:/CNTX%u/.%s.upload",
+        static_cast<unsigned>(context + 1), name);
+    const int backup_length = std::snprintf(
+        upload_backup, sizeof(upload_backup), "0:/CNTX%u/.%s.old",
+        static_cast<unsigned>(context + 1), name);
+    return destination_length > 0 && temporary_length > 0 && backup_length > 0 &&
+           destination_length < static_cast<int>(sizeof(upload_destination)) &&
+           temporary_length < static_cast<int>(sizeof(upload_temporary)) &&
+           backup_length < static_cast<int>(sizeof(upload_backup));
 }
 
 bool add_catalog_entry(BootSource source, ImageFormat format, uint32_t size,
@@ -294,7 +375,12 @@ void rebuild_catalog(uint8_t context)
                     break;
                 }
                 ++directory_entries;
-                if ((catalog_file_info.fattrib & AM_DIR) != 0) {
+                // Dotfiles are conventionally hidden even when the FAT hidden
+                // attribute was not set by the host that created them. Keep
+                // both forms of hidden metadata, and FAT system files, out of
+                // the user-facing core catalog.
+                if (catalog_file_info.fname[0] == '.' ||
+                    (catalog_file_info.fattrib & (AM_DIR | AM_HID | AM_SYS)) != 0) {
                     continue;
                 }
                 ImageFormat format = kFormatNone;
@@ -337,10 +423,12 @@ void rebuild_catalog(uint8_t context)
                           slot.valid ? slot.compressed_size : 0, label);
     }
 
-    char golden[48];
-    std::snprintf(golden, sizeof(golden), "Embedded golden context %u",
-                  static_cast<unsigned>(context == 1 ? 1 : context + 1));
-    add_catalog_entry(BootSource::Golden, kFormatGzip, 0, golden);
+    const GoldenImageInfo* golden = golden_image_for_context(context);
+    if (golden) {
+        add_catalog_entry(BootSource::Golden, kFormatGzip,
+                          static_cast<uint32_t>(golden_image_size(*golden)),
+                          golden->label);
+    }
     const int64_t scan_us =
         absolute_time_diff_us(scan_start, get_absolute_time());
     std::printf(
@@ -387,6 +475,9 @@ uint8_t status_byte()
     }
     if (upload_active && upload_target == kTargetFlashGzip) {
         status |= 0x08;
+    }
+    if (sd_read_source_open) {
+        status |= 0x10;
     }
     if (last_error != kErrorNone) {
         status |= 0x80;
@@ -472,6 +563,8 @@ void abort_upload()
         char temporary[96];
         std::snprintf(temporary, sizeof(temporary), "%s.upload", kImagePaths[upload_slot]);
         f_unlink(temporary);
+    } else if (upload_target == kTargetSdNamed && upload_temporary[0]) {
+        f_unlink(upload_temporary);
     }
     upload_active = false;
     flash_page_used = 0;
@@ -579,6 +672,9 @@ bool begin_upload(const uint8_t* payload, size_t length)
     flash_write_offset = 0;
     flash_first_page_pending = false;
     upload_header_used = 0;
+    upload_destination[0] = '\0';
+    upload_temporary[0] = '\0';
+    upload_backup[0] = '\0';
     std::memset(upload_header, 0, sizeof(upload_header));
     std::memset(upload_tail, 0, sizeof(upload_tail));
 
@@ -587,7 +683,7 @@ bool begin_upload(const uint8_t* payload, size_t length)
         return false;
     }
 
-    if (!upload_label[0]) {
+    if (!upload_label[0] && upload_target == kTargetFlashGzip) {
         std::snprintf(upload_label, sizeof(upload_label), "Uploaded flash slot %u",
                       static_cast<unsigned>(upload_slot + 1));
     }
@@ -600,6 +696,30 @@ bool begin_upload(const uint8_t* payload, size_t length)
         char temporary[96];
         std::snprintf(temporary, sizeof(temporary), "%s.upload", kImagePaths[upload_slot]);
         if (f_open(&upload_file, temporary, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
+            last_error = kErrorFileOpen;
+            return false;
+        }
+        upload_file_open = true;
+    } else if (upload_target == kTargetSdNamed) {
+        if (!sd_available) {
+            last_error = kErrorBadTarget;
+            return false;
+        }
+        if (!prepare_named_upload_paths(upload_slot, upload_label)) {
+            last_error = kErrorBadSelection;
+            return false;
+        }
+        if ((ends_with_casefold(upload_label, ".bin") &&
+             upload_expected_size != kFpgaImageSize) ||
+            (ends_with_casefold(upload_label, ".gz") &&
+             (upload_expected_size < 18 ||
+              upload_expected_size > kMaxSdGzipSize))) {
+            last_error = kErrorSize;
+            return false;
+        }
+        f_unlink(upload_temporary);
+        if (f_open(&upload_file, upload_temporary,
+                   FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
             last_error = kErrorFileOpen;
             return false;
         }
@@ -633,12 +753,16 @@ bool write_upload(const uint8_t* payload, size_t length)
         return false;
     }
 
-    if (upload_target == kTargetSdRaw) {
+    if (upload_target == kTargetSdRaw || upload_target == kTargetSdNamed) {
         UINT written = 0;
         if (f_write(&upload_file, payload, static_cast<UINT>(length), &written) != FR_OK ||
             written != length) {
             last_error = kErrorFileWrite;
             return false;
+        }
+        if (upload_target == kTargetSdNamed &&
+            ends_with_casefold(upload_label, ".gz")) {
+            capture_upload_bytes(payload, length);
         }
     } else {
         capture_upload_bytes(payload, length);
@@ -693,6 +817,32 @@ bool finish_sd_upload()
     return true;
 }
 
+bool finish_named_sd_upload()
+{
+    if (f_sync(&upload_file) != FR_OK) {
+        last_error = kErrorFileWrite;
+        close_upload_file();
+        return false;
+    }
+    close_upload_file();
+
+    f_unlink(upload_backup);
+    const FRESULT backup_result = f_rename(upload_destination, upload_backup);
+    if (backup_result != FR_OK && backup_result != FR_NO_FILE) {
+        last_error = kErrorFileWrite;
+        return false;
+    }
+    if (f_rename(upload_temporary, upload_destination) != FR_OK) {
+        if (backup_result == FR_OK) {
+            f_rename(upload_backup, upload_destination);
+        }
+        last_error = kErrorFileWrite;
+        return false;
+    }
+    f_unlink(upload_backup);
+    return true;
+}
+
 bool finish_upload()
 {
     if (!upload_active) {
@@ -710,7 +860,10 @@ bool finish_upload()
         last_error = kErrorCrc;
         return false;
     }
-    if (upload_target == kTargetFlashGzip && !uploaded_gzip_shape_valid()) {
+    if ((upload_target == kTargetFlashGzip ||
+         (upload_target == kTargetSdNamed &&
+          ends_with_casefold(upload_label, ".gz"))) &&
+        !uploaded_gzip_shape_valid()) {
         last_error = kErrorGzip;
         return false;
     }
@@ -718,6 +871,8 @@ bool finish_upload()
     bool ok = true;
     if (upload_target == kTargetSdRaw) {
         ok = finish_sd_upload();
+    } else if (upload_target == kTargetSdNamed) {
+        ok = finish_named_sd_upload();
     } else {
         ok = flash_program_page() && flash_commit_first_page();
         if (ok && !boot_config_set_flash_slot(upload_slot, upload_size,
@@ -732,6 +887,415 @@ bool finish_upload()
         last_error = kErrorNone;
     }
     return ok;
+}
+
+void close_copy_source()
+{
+    if (copy_source_open) {
+        f_close(&copy_source);
+        copy_source_open = false;
+    }
+}
+
+void fail_incremental_copy(uint8_t error)
+{
+    close_copy_source();
+    copy_error = error;
+    copy_state = kCopyFailed;
+    abort_upload();
+}
+
+bool begin_incremental_sd_to_flash_copy(uint8_t context, const char* path)
+{
+    if (upload_active) {
+        last_error = kErrorUploadActive;
+        return false;
+    }
+    if (!sd_available || context >= kBootContextCount ||
+        !valid_sd_selection_path(context, path) ||
+        !ends_with_casefold(path, ".gz")) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+    if (f_open(&copy_source, path, FA_READ) != FR_OK) {
+        last_error = kErrorFileOpen;
+        return false;
+    }
+    copy_source_open = true;
+    const FSIZE_t source_size = f_size(&copy_source);
+    if (source_size < 18 || source_size > kFlashSlotSize) {
+        close_copy_source();
+        last_error = kErrorFlashSize;
+        return false;
+    }
+
+    const char* basename = std::strrchr(path, '/');
+    basename = basename ? basename + 1 : path;
+    if (!basename[0] || std::strlen(basename) >= sizeof(upload_label)) {
+        close_copy_source();
+        last_error = kErrorBadSelection;
+        return false;
+    }
+
+    upload_target = kTargetFlashGzip;
+    upload_slot = context;
+    upload_expected_size = static_cast<uint32_t>(source_size);
+    upload_expected_crc = 0;
+    upload_size = 0;
+    upload_crc = MZ_CRC32_INIT;
+    flash_page_used = 0;
+    flash_write_offset = 0;
+    flash_first_page_pending = false;
+    upload_header_used = 0;
+    std::memset(upload_header, 0, sizeof(upload_header));
+    std::memset(upload_tail, 0, sizeof(upload_tail));
+    std::snprintf(upload_label, sizeof(upload_label), "%s", basename);
+
+    upload_active = true;
+    copy_state = kCopyErasing;
+    copy_error = kErrorNone;
+    copy_erase_offset = 0;
+    last_error = kErrorNone;
+    return true;
+}
+
+void step_incremental_sd_to_flash_copy()
+{
+    if (copy_state == kCopyErasing) {
+        if (copy_erase_offset == kFlashSlotSize) {
+            copy_state = kCopyWriting;
+            return;
+        }
+        const uint32_t offset = kFlashSlotOffsets[upload_slot] + copy_erase_offset;
+        uint32_t interrupts = save_and_disable_interrupts();
+        flash_range_erase(offset, kCopyEraseStep);
+        restore_interrupts(interrupts);
+
+        const uint8_t* readback = reinterpret_cast<const uint8_t*>(
+            kXipBase + offset);
+        for (uint32_t i = 0; i < kCopyEraseStep; ++i) {
+            if (readback[i] != 0xff) {
+                fail_incremental_copy(kErrorFlashVerify);
+                return;
+            }
+        }
+        copy_erase_offset += kCopyEraseStep;
+        return;
+    }
+
+    if (copy_state == kCopyWriting) {
+        for (unsigned block = 0; block < kCopyBlocksPerStep; ++block) {
+            UINT count = 0;
+            const FRESULT result = f_read(&copy_source, copy_buffer,
+                                          static_cast<UINT>(sizeof(copy_buffer)),
+                                          &count);
+            if (result != FR_OK) {
+                fail_incremental_copy(kErrorCopyRead);
+                return;
+            }
+            if (count == 0) {
+                close_copy_source();
+                upload_expected_crc = static_cast<uint32_t>(upload_crc);
+                copy_state = kCopyFinalizing;
+                return;
+            }
+            if (!write_upload(copy_buffer, count)) {
+                const uint8_t error = last_error;
+                fail_incremental_copy(error);
+                return;
+            }
+        }
+        return;
+    }
+
+    if (copy_state == kCopyFinalizing) {
+        if (!finish_upload()) {
+            const uint8_t error = last_error;
+            fail_incremental_copy(error);
+            return;
+        }
+        copy_state = kCopyDone;
+    }
+}
+
+void prepare_incremental_copy_status(uint32_t nonce, size_t* response_length)
+{
+    write_le32(command_response, nonce);
+    command_response[4] = static_cast<uint8_t>(copy_state);
+    command_response[5] = copy_error;
+    uint32_t current = 0;
+    uint32_t total = upload_expected_size;
+    if (copy_state == kCopyErasing) {
+        current = copy_erase_offset;
+        total = kFlashSlotSize;
+    } else if (copy_state == kCopyWriting ||
+               copy_state == kCopyFinalizing || copy_state == kCopyDone ||
+               copy_state == kCopyFailed) {
+        current = upload_size;
+    }
+    write_le32(command_response + 6, current);
+    write_le32(command_response + 10, total);
+    *response_length = 14;
+}
+
+bool delete_catalog_sd_image(uint8_t context, const char* path)
+{
+    if (upload_active) {
+        last_error = kErrorUploadActive;
+        return false;
+    }
+    if (!sd_available || context >= kBootContextCount ||
+        !valid_sd_selection_path(context, path)) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+
+    // Rebuild immediately before deletion and require an exact SD catalog
+    // entry. This confines deletion to visible root-level FPGA images in the
+    // requested CNTXn directory, not merely any syntactically plausible path.
+    rebuild_catalog(context);
+    bool catalogued = false;
+    for (uint16_t i = 0; i < catalog_count; ++i) {
+        if (catalog[i].source == BootSource::Sd &&
+            std::strcmp(catalog[i].name, path) == 0) {
+            catalogued = true;
+            break;
+        }
+    }
+    if (!catalogued) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+
+    const BootSelection& selection = boot_config_selection(context);
+    const bool selected = selection.source == BootSource::Sd &&
+                          std::strcmp(selection.path, path) == 0;
+    if (f_unlink(path) != FR_OK) {
+        last_error = kErrorDelete;
+        return false;
+    }
+    if (selected &&
+        !boot_config_set_selection(context, BootSource::Auto, "")) {
+        last_error = kErrorMetadata;
+        return false;
+    }
+    last_error = kErrorNone;
+    return true;
+}
+
+void close_sd_read_source()
+{
+    if (sd_read_source_open) {
+        f_close(&sd_read_source);
+        sd_read_source_open = false;
+    }
+    sd_read_cache_valid = false;
+    sd_read_cache_count = 0;
+}
+
+bool begin_catalog_sd_read(uint8_t context, const char* path)
+{
+    if (upload_active || copy_source_open || sd_read_source_open) {
+        last_error = kErrorUploadActive;
+        return false;
+    }
+    if (!sd_available || context >= kBootContextCount ||
+        !valid_sd_selection_path(context, path)) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+
+    // Rebuild immediately before opening and require the exact visible SD
+    // catalog entry. This exposes core images, not a general-purpose remote
+    // filesystem reader.
+    rebuild_catalog(context);
+    const CatalogEntry* selected = nullptr;
+    for (uint16_t i = 0; i < catalog_count; ++i) {
+        if (catalog[i].source == BootSource::Sd &&
+            std::strcmp(catalog[i].name, path) == 0) {
+            selected = &catalog[i];
+            break;
+        }
+    }
+    if (!selected) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+    if (f_open(&sd_read_source, path, FA_READ) != FR_OK) {
+        last_error = kErrorFileOpen;
+        return false;
+    }
+    const FSIZE_t source_size = f_size(&sd_read_source);
+    if (source_size > UINT32_MAX ||
+        static_cast<uint32_t>(source_size) != selected->size) {
+        f_close(&sd_read_source);
+        last_error = kErrorSize;
+        return false;
+    }
+
+    sd_read_source_open = true;
+    sd_read_size = static_cast<uint32_t>(source_size);
+    sd_read_offset = 0;
+    sd_read_crc = MZ_CRC32_INIT;
+    sd_read_cache_offset = 0;
+    sd_read_cache_count = 0;
+    sd_read_cache_valid = false;
+    last_error = kErrorNone;
+    return true;
+}
+
+bool read_catalog_sd_data(uint32_t requested_offset, uint8_t requested_count,
+                          size_t* response_length)
+{
+    if (!sd_read_source_open) {
+        last_error = kErrorNoRead;
+        return false;
+    }
+    if (requested_count == 0 || requested_count > kReadSdChunkSize) {
+        last_error = kErrorLength;
+        return false;
+    }
+
+    if (sd_read_cache_valid && requested_offset == sd_read_cache_offset) {
+        std::memcpy(command_response + 8, sd_read_cache,
+                    sd_read_cache_count);
+        write_le32(command_response + 4, requested_offset);
+        *response_length = 8 + sd_read_cache_count;
+        last_error = kErrorNone;
+        return true;
+    }
+    if (requested_offset != sd_read_offset) {
+        last_error = kErrorReadPosition;
+        return false;
+    }
+
+    const uint32_t remaining = sd_read_size - sd_read_offset;
+    const UINT amount = static_cast<UINT>(
+        remaining < requested_count ? remaining : requested_count);
+    UINT count = 0;
+    const FRESULT result = f_read(&sd_read_source, sd_read_cache, amount,
+                                  &count);
+    if (result != FR_OK || (count == 0 && remaining != 0)) {
+        last_error = kErrorCopyRead;
+        return false;
+    }
+
+    sd_read_cache_offset = sd_read_offset;
+    sd_read_cache_count = static_cast<uint8_t>(count);
+    sd_read_cache_valid = true;
+    sd_read_crc = mz_crc32(sd_read_crc, sd_read_cache, count);
+    sd_read_offset += count;
+    write_le32(command_response + 4, requested_offset);
+    std::memcpy(command_response + 8, sd_read_cache, count);
+    *response_length = 8 + count;
+    last_error = kErrorNone;
+    return true;
+}
+
+bool finish_catalog_sd_read(uint32_t nonce, size_t* response_length)
+{
+    if (!sd_read_source_open) {
+        last_error = kErrorNoRead;
+        return false;
+    }
+    if (sd_read_offset != sd_read_size) {
+        last_error = kErrorReadPosition;
+        return false;
+    }
+    const uint32_t final_size = sd_read_size;
+    const uint32_t final_crc = static_cast<uint32_t>(sd_read_crc);
+    close_sd_read_source();
+    write_le32(command_response, nonce);
+    write_le32(command_response + 4, final_size);
+    write_le32(command_response + 8, final_crc);
+    *response_length = 12;
+    last_error = kErrorNone;
+    return true;
+}
+
+bool copy_sd_image_to_flash(uint8_t context, const char* path,
+                            uint32_t* copied_size)
+{
+    if (upload_active) {
+        last_error = kErrorUploadActive;
+        return false;
+    }
+    if (!sd_available || context >= kBootContextCount ||
+        !valid_sd_selection_path(context, path) ||
+        !ends_with_casefold(path, ".gz")) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+
+    FIL source;
+    if (f_open(&source, path, FA_READ) != FR_OK) {
+        last_error = kErrorFileOpen;
+        return false;
+    }
+    const FSIZE_t source_size = f_size(&source);
+    if (source_size < 18 || source_size > kFlashSlotSize) {
+        f_close(&source);
+        last_error = kErrorFlashSize;
+        return false;
+    }
+
+    upload_target = kTargetFlashGzip;
+    upload_slot = context;
+    upload_expected_size = static_cast<uint32_t>(source_size);
+    upload_expected_crc = 0;
+    upload_size = 0;
+    upload_crc = MZ_CRC32_INIT;
+    flash_page_used = 0;
+    flash_write_offset = 0;
+    flash_first_page_pending = false;
+    upload_header_used = 0;
+    std::memset(upload_header, 0, sizeof(upload_header));
+    std::memset(upload_tail, 0, sizeof(upload_tail));
+    const char* basename = std::strrchr(path, '/');
+    basename = basename ? basename + 1 : path;
+    if (!basename[0] || std::strlen(basename) >= sizeof(upload_label)) {
+        f_close(&source);
+        last_error = kErrorBadSelection;
+        return false;
+    }
+    std::snprintf(upload_label, sizeof(upload_label), "%s", basename);
+
+    uint32_t interrupts = save_and_disable_interrupts();
+    flash_range_erase(kFlashSlotOffsets[context], kFlashSlotSize);
+    restore_interrupts(interrupts);
+    upload_active = true;
+
+    bool ok = true;
+    for (;;) {
+        UINT count = 0;
+        const FRESULT result = f_read(&source, copy_buffer,
+                                      static_cast<UINT>(sizeof(copy_buffer)),
+                                      &count);
+        if (result != FR_OK) {
+            last_error = kErrorCopyRead;
+            ok = false;
+            break;
+        }
+        if (count == 0) {
+            break;
+        }
+        if (!write_upload(copy_buffer, count)) {
+            ok = false;
+            break;
+        }
+    }
+    f_close(&source);
+
+    if (ok) {
+        upload_expected_crc = static_cast<uint32_t>(upload_crc);
+        ok = finish_upload();
+    }
+    if (!ok) {
+        abort_upload();
+        return false;
+    }
+    *copied_size = upload_size;
+    return true;
 }
 
 bool process_request(SupervisorReconfigureRequest* reconfigure_request)
@@ -789,6 +1353,12 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
         finish_upload();
         break;
     case kCommandImageAbort:
+        if (copy_source_open) {
+            close_copy_source();
+            copy_state = kCopyFailed;
+            copy_error = kErrorNoUpload;
+        }
+        close_sd_read_source();
         abort_upload();
         last_error = kErrorNone;
         break;
@@ -804,8 +1374,11 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             last_error = kErrorBadSlot;
         } else if (upload_active) {
             last_error = kErrorUploadActive;
+        } else if (request[kHeaderSize] != physical_context) {
+            last_error = kErrorContextMismatch;
         } else {
             reconfigure_request->context = request[kHeaderSize];
+            reconfigure_request->transient = false;
             last_error = kErrorNone;
             reconfigure = true;
         }
@@ -912,12 +1485,75 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             last_error = kErrorBadSlot;
         } else if (upload_active) {
             last_error = kErrorUploadActive;
+        } else if (request[kHeaderSize + 4] != physical_context) {
+            last_error = kErrorContextMismatch;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
             reconfigure_request->context = request[kHeaderSize + 4];
+            reconfigure_request->transient = false;
             write_le32(command_response, nonce);
             command_response[4] = reconfigure_request->context;
             response_length = 5;
+            last_error = kErrorNone;
+            reconfigure = true;
+        }
+        break;
+    case kCommandReconfigureOnce:
+        if (length < 7) {
+            last_error = kErrorLength;
+        } else if (upload_active) {
+            last_error = kErrorUploadActive;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint8_t context = request[kHeaderSize + 4];
+            const auto source =
+                static_cast<BootSource>(request[kHeaderSize + 5]);
+            const size_t path_length = request[kHeaderSize + 6];
+            if (context >= kBootContextCount ||
+                static_cast<uint8_t>(source) >
+                    static_cast<uint8_t>(BootSource::Golden) ||
+                length != 7 + path_length || path_length >= kBootPathLength) {
+                last_error = kErrorBadSelection;
+                break;
+            }
+            if (context != physical_context) {
+                last_error = kErrorContextMismatch;
+                break;
+            }
+            char path[kBootPathLength]{};
+            std::memcpy(path, request + kHeaderSize + 7, path_length);
+            if ((source == BootSource::Sd &&
+                 !valid_sd_selection_path(context, path)) ||
+                (source != BootSource::Sd && path_length != 0) ||
+                (source == BootSource::Flash &&
+                 !flash_slot_has_gzip(context))) {
+                last_error = kErrorBadSelection;
+                break;
+            }
+            reconfigure_request->context = context;
+            reconfigure_request->transient = true;
+            reconfigure_request->source = static_cast<uint8_t>(source);
+            std::memset(reconfigure_request->path, 0,
+                        sizeof(reconfigure_request->path));
+            std::memcpy(reconfigure_request->path, path, path_length);
+            write_le32(command_response, nonce);
+            command_response[4] = context;
+            command_response[5] = static_cast<uint8_t>(source);
+            response_length = 6;
+            last_error = kErrorNone;
+            reconfigure = true;
+        }
+        break;
+    case kCommandRestartSupervisor:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else if (upload_active) {
+            last_error = kErrorUploadActive;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            reconfigure_request->restart = true;
+            write_le32(command_response, nonce);
+            response_length = 4;
             last_error = kErrorNone;
             reconfigure = true;
         }
@@ -971,6 +1607,148 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             last_error = kErrorNone;
         }
         break;
+    case kCommandCopySdToFlash:
+        if (length < 6) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint8_t context = request[kHeaderSize + 4];
+            const size_t path_length = request[kHeaderSize + 5];
+            if (context >= kBootContextCount || path_length == 0 ||
+                path_length >= kBootPathLength || length != 6 + path_length) {
+                last_error = kErrorBadSelection;
+                break;
+            }
+            char path[kBootPathLength]{};
+            std::memcpy(path, request + kHeaderSize + 6, path_length);
+            uint32_t copied_size = 0;
+            if (copy_sd_image_to_flash(context, path, &copied_size)) {
+                write_le32(command_response, nonce);
+                command_response[4] = context;
+                write_le32(command_response + 5, copied_size);
+                response_length = 9;
+                last_error = kErrorNone;
+            }
+        }
+        break;
+    case kCommandGetBootLog:
+        if (length != 5) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint8_t index = request[kHeaderSize + 4];
+            const size_t count = boot_log_count();
+            if ((count == 0 && index != 0) || (count != 0 && index >= count)) {
+                last_error = kErrorBootLog;
+                break;
+            }
+            const char* line = count == 0 ? "" : boot_log_line(index);
+            const size_t line_length = std::strlen(line);
+            write_le32(command_response, nonce);
+            command_response[4] = static_cast<uint8_t>(count);
+            command_response[5] = index;
+            command_response[6] = static_cast<uint8_t>(line_length);
+            std::memcpy(command_response + 7, line, line_length);
+            response_length = 7 + line_length;
+            last_error = kErrorNone;
+        }
+        break;
+    case kCommandCopySdToFlashBegin:
+        if (length < 6) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint8_t context = request[kHeaderSize + 4];
+            const size_t path_length = request[kHeaderSize + 5];
+            if (context >= kBootContextCount || path_length == 0 ||
+                path_length >= kBootPathLength || length != 6 + path_length) {
+                last_error = kErrorBadSelection;
+                break;
+            }
+            char path[kBootPathLength]{};
+            std::memcpy(path, request + kHeaderSize + 6, path_length);
+            if (begin_incremental_sd_to_flash_copy(context, path)) {
+                prepare_incremental_copy_status(nonce, &response_length);
+            }
+        }
+        break;
+    case kCommandCopySdToFlashStep:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else if (copy_state == kCopyIdle) {
+            last_error = kErrorNoUpload;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            step_incremental_sd_to_flash_copy();
+            prepare_incremental_copy_status(nonce, &response_length);
+            // Operation failures are returned in the copy-status payload so
+            // the manager can retain the final progress display and error.
+            last_error = kErrorNone;
+        }
+        break;
+    case kCommandDeleteSdImage:
+        if (length < 6) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint8_t context = request[kHeaderSize + 4];
+            const size_t path_length = request[kHeaderSize + 5];
+            if (context >= kBootContextCount || path_length == 0 ||
+                path_length >= kBootPathLength || length != 6 + path_length) {
+                last_error = kErrorBadSelection;
+                break;
+            }
+            char path[kBootPathLength]{};
+            std::memcpy(path, request + kHeaderSize + 6, path_length);
+            if (delete_catalog_sd_image(context, path)) {
+                write_le32(command_response, nonce);
+                command_response[4] = context;
+                response_length = 5;
+            }
+        }
+        break;
+    case kCommandReadSdBegin:
+        if (length < 6) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint8_t context = request[kHeaderSize + 4];
+            const size_t path_length = request[kHeaderSize + 5];
+            if (context >= kBootContextCount || path_length == 0 ||
+                path_length >= kBootPathLength ||
+                length != 6 + path_length) {
+                last_error = kErrorBadSelection;
+                break;
+            }
+            char path[kBootPathLength]{};
+            std::memcpy(path, request + kHeaderSize + 6, path_length);
+            if (begin_catalog_sd_read(context, path)) {
+                write_le32(command_response, nonce);
+                command_response[4] = context;
+                write_le32(command_response + 5, sd_read_size);
+                response_length = 9;
+            }
+        }
+        break;
+    case kCommandReadSdData:
+        if (length != 9) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint32_t offset = read_le32(request + kHeaderSize + 4);
+            const uint8_t count = request[kHeaderSize + 8];
+            write_le32(command_response, nonce);
+            read_catalog_sd_data(offset, count, &response_length);
+        }
+        break;
+    case kCommandReadSdEnd:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            finish_catalog_sd_read(nonce, &response_length);
+        }
+        break;
     default:
         last_error = kErrorProtocol;
         break;
@@ -997,9 +1775,10 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
 
 }  // namespace
 
-void supervisor_service_init(bool sd_mounted)
+void supervisor_service_init(bool sd_mounted, uint8_t active_context)
 {
     sd_available = sd_mounted;
+    physical_context = active_context;
 
     adc_init();
     adc_gpio_init(26);
@@ -1028,6 +1807,12 @@ void supervisor_service_init(bool sd_mounted)
 
     last_error = kErrorNone;
     last_command_valid = false;
+    copy_source_open = false;
+    sd_read_source_open = false;
+    sd_read_cache_valid = false;
+    copy_state = kCopyIdle;
+    copy_error = kErrorNone;
+    copy_erase_offset = 0;
     prepare_response(0);
 }
 

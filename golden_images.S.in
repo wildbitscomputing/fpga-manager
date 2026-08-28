@@ -20,3 +20,17 @@ golden_fpga_context4_start:
 .incbin "@GOLDEN_CONTEXT4@"
 .global golden_fpga_context4_end
 golden_fpga_context4_end:
+
+.section .rodata.golden_metadata, "a", %progbits
+
+.global golden_fpga_context1_label
+golden_fpga_context1_label:
+.asciz "@GOLDEN_CONTEXT1_EMBEDDED_LABEL@"
+
+.global golden_fpga_context3_label
+golden_fpga_context3_label:
+.asciz "@GOLDEN_CONTEXT3_EMBEDDED_LABEL@"
+
+.global golden_fpga_context4_label
+golden_fpga_context4_label:
+.asciz "@GOLDEN_CONTEXT4_EMBEDDED_LABEL@"
