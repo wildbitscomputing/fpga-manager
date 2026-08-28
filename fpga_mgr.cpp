@@ -16,6 +16,7 @@
 //
 #include "boot_config.h"
 #include "boot_log.h"
+#include "fpga_manager_version.h"
 #include "fpga_out.pio.h"
 #include "golden_images.h"
 #include "hardware/clocks.h"
@@ -30,6 +31,10 @@
 
 #ifndef FPGA_PIO_CLKDIV
 #define FPGA_PIO_CLKDIV 1.0f
+#endif
+
+#ifndef K2_BOARD_REVISION
+#define K2_BOARD_REVISION "unknown"
 #endif
 
 // datasheet for information on which other pins can be used.
@@ -385,6 +390,8 @@ int main()
     // set_sys_clock_khz(266000, true);
     stdio_init_all();
     boot_log_reset();
+    boot_logf("Manager Rev%s firmware %s", K2_BOARD_REVISION,
+              FPGA_MANAGER_VERSION_STRING);
     xosc_init(); // #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
     time_init();
 
@@ -438,6 +445,8 @@ int main()
     int64_t fpga_us = absolute_time_diff_us(start, get_absolute_time());
 
     printf("=== Wildbits FPGA Manager ===\n");
+    printf("Board    : Rev%s\n", K2_BOARD_REVISION);
+    printf("Firmware : %s\n", FPGA_MANAGER_VERSION_STRING);
     printf("Method   : %s\n", fpga_method_names[method]);
     printf("Time     : %lldms\n", fpga_us / 1000);
     printf("Core Slot: %d\n", dip_switches);

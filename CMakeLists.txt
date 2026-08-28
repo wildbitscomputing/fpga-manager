@@ -45,96 +45,110 @@ configure_file(
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# Golden images are linked into the manager below the mutable 8 MiB slot bank.
-# Context 2 has no core yet, so recovery for it deliberately uses context 1.
-set(GOLDEN_CONTEXT1_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.gz)
-set(GOLDEN_CONTEXT3_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.gz)
-set(GOLDEN_CONTEXT4_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.gz)
-set(GOLDEN_CONTEXT1 ${GOLDEN_CONTEXT1_DEFAULT} CACHE FILEPATH "Golden context 1 gzip image")
-set(GOLDEN_CONTEXT3 ${GOLDEN_CONTEXT3_DEFAULT} CACHE FILEPATH "Golden context 3 gzip image")
-set(GOLDEN_CONTEXT4 ${GOLDEN_CONTEXT4_DEFAULT} CACHE FILEPATH "Golden context 4 gzip image")
-set(GOLDEN_CONTEXT1_LABEL "" CACHE STRING "Golden context 1 display name (empty uses filename)")
-set(GOLDEN_CONTEXT3_LABEL "" CACHE STRING "Golden context 3 display name (empty uses filename)")
-set(GOLDEN_CONTEXT4_LABEL "" CACHE STRING "Golden context 4 display name (empty uses filename)")
-set(GOLDEN_CONTEXT1_DEFAULT_LABEL "CFP95600C.bin.gz")
-set(GOLDEN_CONTEXT3_DEFAULT_LABEL "Wildbits_k2_6809_int_wizfi_turbo_v5_20260827.bin.gz")
-set(GOLDEN_CONTEXT4_DEFAULT_LABEL "WildbitsK2_2x_B0C_02020103_20260827.bin.gz")
-foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
-    if(NOT EXISTS "${${GOLDEN_IMAGE}}")
-        message(FATAL_ERROR "Missing required recovery image: ${${GOLDEN_IMAGE}}")
-    endif()
-    file(TO_CMAKE_PATH "${${GOLDEN_IMAGE}}" ${GOLDEN_IMAGE})
-endforeach()
-foreach(GOLDEN_CONTEXT IN ITEMS 1 3 4)
-    if(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_LABEL STREQUAL "")
-        if(GOLDEN_CONTEXT${GOLDEN_CONTEXT} STREQUAL
-           GOLDEN_CONTEXT${GOLDEN_CONTEXT}_DEFAULT)
-            set(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
-                "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_DEFAULT_LABEL}")
-        else()
-            get_filename_component(
-                GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
-                "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}}" NAME
-            )
+# Golden images are linked into each board-specific manager below the mutable
+# 8 MiB slot bank. FPGA bitstreams are not interchangeable between RevB0C and
+# RevB3B, so one CMake build always emits both explicitly named variants.
+set(K2_BOARD_REVISIONS B0C B3B)
+
+set(GOLDEN_B0C_CONTEXT1_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B0C/context1.gz)
+set(GOLDEN_B0C_CONTEXT3_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B0C/context3.gz)
+set(GOLDEN_B0C_CONTEXT4_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B0C/context4.gz)
+set(GOLDEN_B3B_CONTEXT1_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B3B/context1.gz)
+# There is not yet a RevB3B build of the 6809 core. Use the known-good RevB3B
+# context-1 image as context-3 recovery rather than embedding a B0C bitstream.
+set(GOLDEN_B3B_CONTEXT3_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B3B/context1.gz)
+set(GOLDEN_B3B_CONTEXT4_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B3B/context4.gz)
+
+set(GOLDEN_B0C_CONTEXT1_DEFAULT_LABEL "CFP95600C_B0C.bin.gz")
+set(GOLDEN_B0C_CONTEXT3_DEFAULT_LABEL
+    "Wildbits_k2_6809_int_wizfi_turbo_v5_B0C_20260827.bin.gz")
+set(GOLDEN_B0C_CONTEXT4_DEFAULT_LABEL
+    "WildbitsK2_2x_B0C_02020103_20260827.bin.gz")
+set(GOLDEN_B3B_CONTEXT1_DEFAULT_LABEL "CFP95600C_B3B.bin.gz")
+set(GOLDEN_B3B_CONTEXT3_DEFAULT_LABEL
+    "CFP95600C_B3B.bin.gz (context 3 recovery fallback)")
+set(GOLDEN_B3B_CONTEXT4_DEFAULT_LABEL
+    "WildbitsK2_2x_B3B_02020103_20260827.bin.gz")
+
+set(GOLDEN_B0C_CONTEXT1_SOURCE_CONTEXT 1)
+set(GOLDEN_B0C_CONTEXT3_SOURCE_CONTEXT 3)
+set(GOLDEN_B0C_CONTEXT4_SOURCE_CONTEXT 4)
+set(GOLDEN_B3B_CONTEXT1_SOURCE_CONTEXT 1)
+set(GOLDEN_B3B_CONTEXT3_SOURCE_CONTEXT 1)
+set(GOLDEN_B3B_CONTEXT4_SOURCE_CONTEXT 4)
+
+foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
+    set(GOLDEN_FPGA_TOTAL_SIZE 0)
+    set(GOLDEN_IMAGE_DEPENDENCIES "")
+    foreach(GOLDEN_CONTEXT IN ITEMS 1 3 4)
+        set(GOLDEN_IMAGE_VARIABLE
+            "GOLDEN_${K2_BOARD_REVISION}_CONTEXT${GOLDEN_CONTEXT}")
+        set(GOLDEN_DEFAULT_VARIABLE "${GOLDEN_IMAGE_VARIABLE}_DEFAULT")
+        set(GOLDEN_LABEL_VARIABLE "${GOLDEN_IMAGE_VARIABLE}_LABEL")
+        set(GOLDEN_DEFAULT_LABEL_VARIABLE
+            "${GOLDEN_IMAGE_VARIABLE}_DEFAULT_LABEL")
+
+        set(${GOLDEN_IMAGE_VARIABLE} "${${GOLDEN_DEFAULT_VARIABLE}}"
+            CACHE FILEPATH
+            "Rev${K2_BOARD_REVISION} golden context ${GOLDEN_CONTEXT} gzip image")
+        set(${GOLDEN_LABEL_VARIABLE} "" CACHE STRING
+            "Rev${K2_BOARD_REVISION} golden context ${GOLDEN_CONTEXT} display name")
+
+        if(NOT EXISTS "${${GOLDEN_IMAGE_VARIABLE}}")
+            message(FATAL_ERROR
+                "Missing Rev${K2_BOARD_REVISION} recovery image: ${${GOLDEN_IMAGE_VARIABLE}}")
         endif()
-    else()
+        file(TO_CMAKE_PATH "${${GOLDEN_IMAGE_VARIABLE}}" GOLDEN_IMAGE_PATH)
+        set(GOLDEN_CONTEXT${GOLDEN_CONTEXT} "${GOLDEN_IMAGE_PATH}")
+        list(APPEND GOLDEN_IMAGE_DEPENDENCIES "${GOLDEN_IMAGE_PATH}")
+
+        if("${${GOLDEN_LABEL_VARIABLE}}" STREQUAL "")
+            if("${${GOLDEN_IMAGE_VARIABLE}}" STREQUAL
+               "${${GOLDEN_DEFAULT_VARIABLE}}")
+                set(GOLDEN_EMBEDDED_LABEL
+                    "${${GOLDEN_DEFAULT_LABEL_VARIABLE}}")
+            else()
+                get_filename_component(GOLDEN_EMBEDDED_LABEL
+                    "${${GOLDEN_IMAGE_VARIABLE}}" NAME)
+            endif()
+        else()
+            set(GOLDEN_EMBEDDED_LABEL "${${GOLDEN_LABEL_VARIABLE}}")
+        endif()
+        string(LENGTH "${GOLDEN_EMBEDDED_LABEL}" GOLDEN_CONTEXT_LABEL_LENGTH)
+        if(GOLDEN_CONTEXT_LABEL_LENGTH GREATER 191)
+            message(FATAL_ERROR
+                "Rev${K2_BOARD_REVISION} golden context ${GOLDEN_CONTEXT} display name exceeds 191 characters")
+        endif()
+        if(GOLDEN_EMBEDDED_LABEL MATCHES "[\r\n]")
+            message(FATAL_ERROR
+                "Rev${K2_BOARD_REVISION} golden context ${GOLDEN_CONTEXT} display name contains a newline")
+        endif()
+        string(REPLACE "\\" "\\\\" GOLDEN_EMBEDDED_LABEL
+               "${GOLDEN_EMBEDDED_LABEL}")
+        string(REPLACE "\"" "\\\"" GOLDEN_EMBEDDED_LABEL
+               "${GOLDEN_EMBEDDED_LABEL}")
         set(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
-            "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_LABEL}")
-    endif()
-    string(LENGTH "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL}"
-           GOLDEN_CONTEXT_LABEL_LENGTH)
-    if(GOLDEN_CONTEXT_LABEL_LENGTH GREATER 191)
+            "${GOLDEN_EMBEDDED_LABEL}")
+
+        file(SIZE "${GOLDEN_IMAGE_PATH}" GOLDEN_IMAGE_SIZE)
+        math(EXPR GOLDEN_FPGA_TOTAL_SIZE
+             "${GOLDEN_FPGA_TOTAL_SIZE} + ${GOLDEN_IMAGE_SIZE}")
+    endforeach()
+
+    if(GOLDEN_FPGA_TOTAL_SIZE GREATER 6291456)
         message(FATAL_ERROR
-            "Golden context ${GOLDEN_CONTEXT} display name exceeds 191 characters")
+            "Rev${K2_BOARD_REVISION} golden images total ${GOLDEN_FPGA_TOTAL_SIZE} bytes; maximum is 6 MiB")
     endif()
-    if(GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL MATCHES "[\r\n]")
-        message(FATAL_ERROR
-            "Golden context ${GOLDEN_CONTEXT} display name contains a newline")
-    endif()
-    # Quote the label for use as an assembler string literal.
-    string(REPLACE "\\" "\\\\" GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
-           "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL}")
-    string(REPLACE "\"" "\\\"" GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL
-           "${GOLDEN_CONTEXT${GOLDEN_CONTEXT}_EMBEDDED_LABEL}")
+
+    set(GOLDEN_ASSEMBLY
+        ${CMAKE_CURRENT_BINARY_DIR}/golden_images_${K2_BOARD_REVISION}.S)
+    configure_file(golden_images.S.in ${GOLDEN_ASSEMBLY} @ONLY)
+    set_property(SOURCE ${GOLDEN_ASSEMBLY} APPEND PROPERTY
+        OBJECT_DEPENDS "${GOLDEN_IMAGE_DEPENDENCIES}")
+    set(GOLDEN_ASSEMBLY_${K2_BOARD_REVISION} ${GOLDEN_ASSEMBLY})
 endforeach()
-configure_file(golden_images.S.in ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S @ONLY)
-set_property(SOURCE ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S APPEND PROPERTY
-    OBJECT_DEPENDS
-        "${GOLDEN_CONTEXT1};${GOLDEN_CONTEXT3};${GOLDEN_CONTEXT4}"
-)
-set(GOLDEN_FPGA_TOTAL_SIZE 0)
-foreach(GOLDEN_IMAGE IN ITEMS GOLDEN_CONTEXT1 GOLDEN_CONTEXT3 GOLDEN_CONTEXT4)
-    file(SIZE "${${GOLDEN_IMAGE}}" GOLDEN_IMAGE_SIZE)
-    math(EXPR GOLDEN_FPGA_TOTAL_SIZE "${GOLDEN_FPGA_TOTAL_SIZE} + ${GOLDEN_IMAGE_SIZE}")
-endforeach()
-if(GOLDEN_FPGA_TOTAL_SIZE GREATER 6291456)
-    message(FATAL_ERROR "Golden images total ${GOLDEN_FPGA_TOTAL_SIZE} bytes; maximum is 6 MiB")
-endif()
 
 add_subdirectory(FatFs_SPI build)
-
-# Add executable.
-add_executable(fpga_mgr
-    boot_config.cpp
-    boot_log.cpp
-    fpga_mgr.cpp
-    golden_images.cpp
-    hw_config.c
-    miniz.c
-    miniz_tinfl.c
-    miniz_tdef.c
-    supervisor_service.cpp
-    ${CMAKE_CURRENT_BINARY_DIR}/golden_images.S
-)
-
-# Enable stricter-than-default compile-time warnings and checks
-target_compile_options(fpga_mgr PRIVATE
-    -Wall
-    -Wextra
-    -Wformat=2
-    -Werror=format
-    -Wno-unused-function
-)
 
 # Disable select warnings on third-party code
 get_target_property(FATFS_SPI_SOURCES FatFs_SPI INTERFACE_SOURCES)
@@ -150,20 +164,89 @@ set_property(
         -Wno-type-limits
 )
 
-# Generate PIO header for FPGA data+clock output.
-pico_generate_pio_header(fpga_mgr ${CMAKE_CURRENT_LIST_DIR}/fpga_out.pio)
-pico_generate_pio_header(fpga_mgr ${CMAKE_CURRENT_LIST_DIR}/supervisor_spi.pio)
+option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" OFF)
 
-# Add the standard library and FatFS/SPI to the build
-target_link_libraries(fpga_mgr
-    pico_stdlib
-    hardware_dma
-    hardware_pio
-    hardware_adc
-    hardware_flash
-    hardware_watchdog
-    FatFs_SPI
+set(FPGA_MGR_SOURCES
+    boot_config.cpp
+    boot_log.cpp
+    fpga_mgr.cpp
+    golden_images.cpp
+    hw_config.c
+    miniz.c
+    miniz_tinfl.c
+    miniz_tdef.c
+    supervisor_service.cpp
 )
+
+function(add_fpga_manager_variant K2_BOARD_REVISION)
+    set(FPGA_MGR_TARGET fpga_mgr_${K2_BOARD_REVISION})
+    add_executable(${FPGA_MGR_TARGET}
+        ${FPGA_MGR_SOURCES}
+        ${GOLDEN_ASSEMBLY_${K2_BOARD_REVISION}}
+    )
+
+    target_compile_options(${FPGA_MGR_TARGET} PRIVATE
+        -Wall
+        -Wextra
+        -Wformat=2
+        -Werror=format
+        -Wno-unused-function
+    )
+    target_compile_definitions(${FPGA_MGR_TARGET} PRIVATE
+        K2_BOARD_REVISION="${K2_BOARD_REVISION}"
+        GOLDEN_CONTEXT1_SOURCE_CONTEXT=${GOLDEN_${K2_BOARD_REVISION}_CONTEXT1_SOURCE_CONTEXT}
+        GOLDEN_CONTEXT3_SOURCE_CONTEXT=${GOLDEN_${K2_BOARD_REVISION}_CONTEXT3_SOURCE_CONTEXT}
+        GOLDEN_CONTEXT4_SOURCE_CONTEXT=${GOLDEN_${K2_BOARD_REVISION}_CONTEXT4_SOURCE_CONTEXT}
+    )
+
+    set(PIO_HEADER_DIR
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/${FPGA_MGR_TARGET})
+    pico_generate_pio_header(${FPGA_MGR_TARGET}
+        ${CMAKE_CURRENT_LIST_DIR}/fpga_out.pio
+        OUTPUT_DIR ${PIO_HEADER_DIR})
+    pico_generate_pio_header(${FPGA_MGR_TARGET}
+        ${CMAKE_CURRENT_LIST_DIR}/supervisor_spi.pio
+        OUTPUT_DIR ${PIO_HEADER_DIR})
+
+    target_link_libraries(${FPGA_MGR_TARGET}
+        pico_stdlib
+        hardware_dma
+        hardware_pio
+        hardware_adc
+        hardware_flash
+        hardware_watchdog
+        FatFs_SPI
+    )
+
+    pico_set_program_name(${FPGA_MGR_TARGET} "${FPGA_MGR_TARGET}")
+    pico_set_program_version(${FPGA_MGR_TARGET} "${PROJECT_VERSION}")
+
+    if(FPGA_MGR_UART_DEBUG)
+        target_compile_definitions(${FPGA_MGR_TARGET} PRIVATE
+            PICO_DEFAULT_UART=1
+            PICO_DEFAULT_UART_TX_PIN=24
+            PICO_DEFAULT_UART_RX_PIN=25
+            PICO_DEFAULT_UART_BAUD_RATE=115200
+        )
+        pico_enable_stdio_uart(${FPGA_MGR_TARGET} 1)
+    else()
+        pico_enable_stdio_uart(${FPGA_MGR_TARGET} 0)
+    endif()
+    pico_enable_stdio_usb(${FPGA_MGR_TARGET} 1)
+    pico_add_extra_outputs(${FPGA_MGR_TARGET})
+
+    target_include_directories(${FPGA_MGR_TARGET} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${PIO_HEADER_DIR}
+    )
+endfunction()
+
+foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
+    add_fpga_manager_variant(${K2_BOARD_REVISION})
+endforeach()
+
+add_custom_target(fpga_mgr DEPENDS fpga_mgr_B0C fpga_mgr_B3B)
 
 find_package(Python3 COMPONENTS Interpreter)
 
@@ -176,30 +259,41 @@ else()
     find_program(PICOTOOL_EXECUTABLE picotool)
 endif()
 
-set(FPGA_GZIP_0 ${CMAKE_CURRENT_LIST_DIR}/fpga/context1.gz)
-set(FPGA_GZIP_2 ${CMAKE_CURRENT_LIST_DIR}/fpga/context3.gz)
-set(FPGA_GZIP_3 ${CMAKE_CURRENT_LIST_DIR}/fpga/context4.gz)
-set(FPGA_UF2_0 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot0.uf2)
-set(FPGA_UF2_2 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot2.uf2)
-set(FPGA_UF2_3 ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot3.uf2)
-set(COMBINED_UF2 ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_with_fpga.uf2)
-
 if (PICOTOOL_EXECUTABLE AND Python3_Interpreter_FOUND)
-    add_custom_command(
-        OUTPUT ${FPGA_UF2_0} ${FPGA_UF2_2} ${FPGA_UF2_3} ${COMBINED_UF2}
-        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10800000 -t bin ${FPGA_GZIP_0} ${FPGA_UF2_0} --family rp2040
-        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10C00000 -t bin ${FPGA_GZIP_2} ${FPGA_UF2_2} --family rp2040
-        COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10E00000 -t bin ${FPGA_GZIP_3} ${FPGA_UF2_3} --family rp2040
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/tools/concat_uf2.py
-                ${COMBINED_UF2}
-                ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr.uf2
-                ${FPGA_UF2_0}
-                ${FPGA_UF2_2}
-                ${FPGA_UF2_3}
-        DEPENDS fpga_mgr ${FPGA_GZIP_0} ${FPGA_GZIP_2} ${FPGA_GZIP_3}
-        COMMENT "Building combined UF2 with FPGA gzip blobs"
-    )
-    add_custom_target(fpga_mgr_with_fpga_uf2 DEPENDS ${COMBINED_UF2})
+    foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
+        set(FPGA_GZIP_0 ${GOLDEN_${K2_BOARD_REVISION}_CONTEXT1})
+        set(FPGA_GZIP_2 ${GOLDEN_${K2_BOARD_REVISION}_CONTEXT3})
+        set(FPGA_GZIP_3 ${GOLDEN_${K2_BOARD_REVISION}_CONTEXT4})
+        set(FPGA_UF2_0
+            ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot0_${K2_BOARD_REVISION}.uf2)
+        set(FPGA_UF2_2
+            ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot2_${K2_BOARD_REVISION}.uf2)
+        set(FPGA_UF2_3
+            ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot3_${K2_BOARD_REVISION}.uf2)
+        set(COMBINED_UF2
+            ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_${K2_BOARD_REVISION}_with_fpga.uf2)
+
+        add_custom_command(
+            OUTPUT ${FPGA_UF2_0} ${FPGA_UF2_2} ${FPGA_UF2_3} ${COMBINED_UF2}
+            COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10800000 -t bin ${FPGA_GZIP_0} ${FPGA_UF2_0} --family rp2040
+            COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10C00000 -t bin ${FPGA_GZIP_2} ${FPGA_UF2_2} --family rp2040
+            COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10E00000 -t bin ${FPGA_GZIP_3} ${FPGA_UF2_3} --family rp2040
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/tools/concat_uf2.py
+                    ${COMBINED_UF2}
+                    ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_${K2_BOARD_REVISION}.uf2
+                    ${FPGA_UF2_0}
+                    ${FPGA_UF2_2}
+                    ${FPGA_UF2_3}
+            DEPENDS fpga_mgr_${K2_BOARD_REVISION}
+                    ${FPGA_GZIP_0} ${FPGA_GZIP_2} ${FPGA_GZIP_3}
+            COMMENT "Building Rev${K2_BOARD_REVISION} combined UF2 with FPGA gzip blobs"
+            VERBATIM
+        )
+        add_custom_target(fpga_mgr_${K2_BOARD_REVISION}_with_fpga_uf2
+            DEPENDS ${COMBINED_UF2})
+    endforeach()
+    add_custom_target(fpga_mgr_with_fpga_uf2
+        DEPENDS fpga_mgr_B0C_with_fpga_uf2 fpga_mgr_B3B_with_fpga_uf2)
 else()
     set(_FPGA_UF2_MISSING "")
     if (NOT PICOTOOL_EXECUTABLE)
@@ -221,29 +315,3 @@ else()
         VERBATIM
     )
 endif()
-#pico_set_binary_type(fpga_mgr no_flash)
-pico_set_program_name(fpga_mgr "fpga_mgr")
-pico_set_program_version(fpga_mgr "${PROJECT_VERSION}")
-
-# Choose source and destination for standard input and output:
-#   See 4.1. Serial input and output on Raspberry Pi Pico in Getting started with Raspberry Pi Pico (https://datasheets.raspberrypi.org/pico/getting-started-with-pico.pdf)
-#   and 2.7.1. Standard Input/Output (stdio) Support in Raspberry Pi Pico C/C++ SDK (https://datasheets.raspberrypi.org/pico/raspberry-pi-pico-c-sdk.pdf):
-option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" OFF)
-if(FPGA_MGR_UART_DEBUG)
-    target_compile_definitions(fpga_mgr PRIVATE
-        PICO_DEFAULT_UART=1
-        PICO_DEFAULT_UART_TX_PIN=24
-        PICO_DEFAULT_UART_RX_PIN=25
-        PICO_DEFAULT_UART_BAUD_RATE=115200
-    )
-    pico_enable_stdio_uart(fpga_mgr 1)
-else()
-    pico_enable_stdio_uart(fpga_mgr 0)
-endif()
-pico_enable_stdio_usb(fpga_mgr 1)
-pico_add_extra_outputs(fpga_mgr)
-
-target_include_directories(fpga_mgr PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}
-)
