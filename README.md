@@ -157,12 +157,16 @@ not electrically interchangeable, so the build always produces separately
 named firmware for both revisions. The in-tree images are organized as:
 
 - `fpga/B0C/context1.gz`, `context3.gz`, and `context4.gz`
-- `fpga/B3B/context1.gz` and `context4.gz`
+- `fpga/B3B/context1.gz`, `context3.gz`, and `context4.gz`
 
-There is currently no RevB3B build of the context-3 6809 core. RevB3B
-context-3 golden recovery therefore deliberately loads the known-good RevB3B
-context-1 image. The boot log and catalog identify it as a fallback; a RevB0C
-image is never embedded in the RevB3B manager.
+The RevB3B context-3 recovery image is the Foenix138 BlackBoard B3B core. A
+RevB0C image is never embedded in the RevB3B manager.
+
+The default RevB3B context-1 and context-3 payloads come from the corresponding
+[`CFP95600C`](https://github.com/Mu0n/F256MiscGoodies/blob/main/fpga/K2/CNTX1/2025-02-02/CFP95600C.bin)
+and
+[`Foenix138 BlackBoard B3B`](https://github.com/Mu0n/F256MiscGoodies/blob/main/fpga/K2/CNTX4/F256K2x_Cores_Foenix138_BlackBoard_B3B_July27th_2025.bin)
+images in F256MiscGoodies.
 
 Each embedded image carries immutable build-time metadata containing its
 display name, compressed size, and source context. The in-tree golden images
