@@ -8,13 +8,13 @@
 .vscode/.cortex-debug*
 build
 build_*/
+build-*/
 .cache/*
 .DS_Store
 fpga/*.bin
 fpga/*.gz
-!fpga/context1.gz
-!fpga/context3.gz
-!fpga/context4.gz
+!fpga/B0C/*.gz
+!fpga/B3B/*.gz
 k2/*.bin
 k2/*.pgz
 k2/*.lst

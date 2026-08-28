@@ -151,22 +151,32 @@ and golden images.
 
 ## Golden recovery images
 
-Three immutable golden gzip images are linked into the manager firmware below
-the replaceable slot bank. The build requires:
+Three immutable golden gzip images are linked into each board-specific manager
+firmware below the replaceable slot bank. FPGA images for RevB0C and RevB3B are
+not electrically interchangeable, so the build always produces separately
+named firmware for both revisions. The in-tree images are organized as:
 
-- `fpga/context1.gz`
-- `fpga/context3.gz`
-- `fpga/context4.gz`
+- `fpga/B0C/context1.gz`, `context3.gz`, and `context4.gz`
+- `fpga/B3B/context1.gz`, `context3.gz`, and `context4.gz`
+
+The RevB3B context-3 recovery image is the Foenix138 BlackBoard B3B core. A
+RevB0C image is never embedded in the RevB3B manager.
+
+The default RevB3B context-1 and context-3 payloads come from the corresponding
+[`CFP95600C`](https://github.com/Mu0n/F256MiscGoodies/blob/main/fpga/K2/CNTX1/2025-02-02/CFP95600C.bin)
+and
+[`Foenix138 BlackBoard B3B`](https://github.com/Mu0n/F256MiscGoodies/blob/main/fpga/K2/CNTX4/F256K2x_Cores_Foenix138_BlackBoard_B3B_July27th_2025.bin)
+images in F256MiscGoodies.
 
 Each embedded image carries immutable build-time metadata containing its
 display name, compressed size, and source context. The in-tree golden images
 have their original core names assigned in `CMakeLists.txt`. A build using a
-different `GOLDEN_CONTEXTn` file derives the name from that filename, or can
-set `GOLDEN_CONTEXTn_LABEL` explicitly, for example:
+different `GOLDEN_<revision>_CONTEXTn` file derives the name from that filename,
+or can set `GOLDEN_<revision>_CONTEXTn_LABEL` explicitly, for example:
 
 ```sh
 cmake -S . -B build \
-  -DGOLDEN_CONTEXT4_LABEL=WildbitsK2_2x_B0C_02020103_20260827.bin.gz
+  -DGOLDEN_B0C_CONTEXT4_LABEL=WildbitsK2_2x_B0C_02020103_20260827.bin.gz
 ```
 
 The catalog, running-core status, and serial boot diagnostics all report this
@@ -297,15 +307,33 @@ default while retaining USB stdio.
 
 Artifacts (in `build/`):
 
-- `fpga_mgr.uf2` (main firmware)
-- `fpga_mgr.elf` / `fpga_mgr.bin`
-- `fpga_mgr_with_fpga.uf2` (`--target fpga_mgr_with_fpga_uf2`, requires
-  `picotool` + Python)
+- `fpga_mgr_B0C.uf2` and `fpga_mgr_B0C.elf`
+- `fpga_mgr_B3B.uf2` and `fpga_mgr_B3B.elf`
+- `fpga_mgr_B0C.bin` and `fpga_mgr_B3B.bin`
+- `fpga_mgr_B0C_with_fpga.uf2` and `fpga_mgr_B3B_with_fpga.uf2`
+  (`--target fpga_mgr_with_fpga_uf2`, requires `picotool` + Python)
+
+Use only the artifact matching the hardware revision printed on the K2 board.
+The plain UF2/ELF contains the supervisor and its board-specific immutable
+golden images. The `_with_fpga` UF2 additionally preloads the corresponding
+replaceable flash slots.
+
+Build the self-contained end-user ZIP, including the board-specific UF2/ELF
+files, K2 utility, quick-start guide, detailed documentation, and license with:
+
+```sh
+just package-release
+```
+
+The package is written to `build/release/fpga-manager-<version>.zip`. Its
+`README.md` is sourced from `release/README.md`; this full project document is
+included as `TECHNICAL.md`.
 
 ## Combined UF2 with FPGA images
 
 If `picotool` and Python 3 are available, CMake exposes a target that bundles
-the firmware UF2 with the gzip images from `fpga/` into one UF2:
+each board-specific firmware UF2 with the matching gzip images from `fpga/`
+into two combined UF2 files:
 
 ```sh
 cmake --build . --target fpga_mgr_with_fpga_uf2

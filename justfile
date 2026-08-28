@@ -11,10 +11,18 @@ set default-list
     cmake --build . --target {{target}}
 
 @build: (build-target "fpga_mgr")
+@build-b0c: (build-target "fpga_mgr_B0C")
+@build-b3b: (build-target "fpga_mgr_B3B")
 @build-with-fpga-load: (build-target "fpga_mgr_with_fpga_uf2")
 
 @build-k2-uploader:
     make -C k2
+
+@build-k2-core-manager:
+    make -C k2 core-manager
+
+@package-release: build build-k2-core-manager
+    python3 tools/package_release.py --build-dir build
 
 @run-k2-uploader:
     make -C k2 pgz
