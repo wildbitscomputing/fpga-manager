@@ -401,7 +401,7 @@ int main()
     boot_config_init();
 
     // Holding the active-low system reset for at least 500 ms during manager
-    // startup forces the immutable golden image selected by the context DIP.
+    // startup forces recovery. Only physical context 4 has an embedded image.
     bool force_golden = !gpio_get(FPGA_SYSTEM_RSTn);
     sleep_ms(500);
     force_golden = force_golden && !gpio_get(FPGA_SYSTEM_RSTn);
@@ -438,7 +438,7 @@ int main()
     method = program_selected_context(dip_switches, sd_mounted, force_golden);
 
     if (method == FPGA_METHOD_NONE) {
-        panic("Golden FPGA recovery image failed\n");
+        panic("No usable FPGA image; select context 4 for recovery\n");
     }
 
     // measure programming time
@@ -976,17 +976,16 @@ fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice)
     const unsigned int slot = sw_choice & 0x03;
     const GoldenImageInfo* image = golden_image_for_context(slot);
     if (!image) {
+        printf("No embedded recovery image for context %u; use context 4\n",
+               static_cast<unsigned>(slot + 1));
+        boot_logf("No GOLDEN for context %u; use context 4",
+                  static_cast<unsigned>(slot + 1));
         return FPGA_METHOD_NONE;
     }
     const size_t length = golden_image_size(*image);
-    const unsigned int requested_context = slot + 1;
-    const unsigned int source_context = image->source_context;
-    if (requested_context != source_context) {
-        printf("Golden context %u is unavailable; using %s (context %u)\n",
-               requested_context, image->label, source_context);
-    }
     printf("Programming embedded golden %s for context %u (%u bytes)\n",
-           image->label, source_context, static_cast<unsigned int>(length));
+           image->label, static_cast<unsigned>(slot + 1),
+           static_cast<unsigned int>(length));
     boot_logf("Try GOLDEN: %s", image->label);
     if (program_fpga_from_gz_data(image->start, length, false)) {
         boot_runtime_set(slot, BootSource::Golden, image->label);
@@ -1038,7 +1037,21 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
         }
         break;
     case BootSource::Golden:
-        return program_fpga_from_golden_slot(slot);
+        method = program_fpga_from_golden_slot(slot);
+        if (method != FPGA_METHOD_NONE) {
+            return method;
+        }
+        // This is reachable for a legacy context 1-3 GOLDEN selection. Treat
+        // it as AUTO so an upgrade cannot strand an otherwise usable context.
+        printf("Obsolete golden selection; trying automatic sources\n");
+        boot_logf("Fallback: unavailable GOLDEN -> AUTO");
+        if (sd_mounted) {
+            method = program_fpga_from_sd_card(info, slot);
+        }
+        if (method == FPGA_METHOD_NONE) {
+            method = program_fpga_from_flash_slot(info, slot);
+        }
+        break;
     case BootSource::Auto:
     default:
         if (sd_mounted) {
@@ -1053,10 +1066,15 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
     }
 
     if (method == FPGA_METHOD_NONE) {
-        printf("Selected image and fallbacks failed; trying golden slot %u\n",
-               static_cast<unsigned>(slot + 1));
-        boot_logf("Fallback: mutable sources -> GOLDEN");
-        method = program_fpga_from_golden_slot(slot);
+        if (golden_image_for_context(slot)) {
+            printf("Selected image and fallbacks failed; trying context-4 recovery\n");
+            boot_logf("Fallback: mutable sources -> GOLDEN");
+            method = program_fpga_from_golden_slot(slot);
+        } else {
+            printf("No usable image for context %u; use context 4 for recovery\n",
+                   static_cast<unsigned>(slot + 1));
+            boot_logf("No usable image; switch to context 4 for recovery");
+        }
     }
     return method;
 }
@@ -1068,8 +1086,8 @@ fpga_method_t program_selected_context(uint8_t slot, bool sd_mounted,
         return FPGA_METHOD_NONE;
     }
     if (force_golden) {
-        printf("RESET held during startup: forcing golden image\n");
-        boot_logf("RESET held: force GOLDEN");
+        printf("RESET held during startup: forcing context recovery\n");
+        boot_logf("RESET held: force recovery");
         return program_fpga_from_golden_slot(slot);
     }
     return program_context_selection(slot, sd_mounted,
