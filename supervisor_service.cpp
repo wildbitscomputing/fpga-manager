@@ -372,8 +372,10 @@ void rebuild_catalog(uint8_t context)
         ++catalog_generation;
     }
 
+    const GoldenImageInfo* golden = golden_image_for_context(context);
     add_catalog_entry(BootSource::Auto, kFormatNone, 0,
-                      "Automatic (SD, flash, golden)");
+                      golden ? "Automatic (SD, flash, golden)"
+                             : "Automatic (SD, flash)");
 
     if (sd_available) {
         char directory[16];
@@ -381,9 +383,10 @@ void rebuild_catalog(uint8_t context)
                       static_cast<unsigned>(context + 1));
         if (f_opendir(&catalog_directory, directory) == FR_OK) {
             for (;;) {
-                // Always reserve the final two catalog positions for the
-                // replaceable flash slot and immutable golden recovery.
-                if (catalog_count >= kCatalogCapacity - 2) {
+                // Reserve room for the replaceable flash slot and, in
+                // context 4, the immutable recovery entry.
+                const size_t reserved_entries = golden ? 2 : 1;
+                if (catalog_count >= kCatalogCapacity - reserved_entries) {
                     break;
                 }
                 FRESULT result = f_readdir(&catalog_directory,
@@ -444,7 +447,6 @@ void rebuild_catalog(uint8_t context)
                           slot.valid ? slot.compressed_size : 0, label);
     }
 
-    const GoldenImageInfo* golden = golden_image_for_context(context);
     if (golden) {
         add_catalog_entry(BootSource::Golden, kFormatGzip,
                           static_cast<uint32_t>(golden_image_size(*golden)),
@@ -1494,7 +1496,9 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             if ((source == BootSource::Sd &&
                  !valid_sd_selection_path(context, path)) ||
                 (source != BootSource::Sd && path_length != 0) ||
-                (source == BootSource::Flash && !flash_slot_has_gzip(context))) {
+                (source == BootSource::Flash && !flash_slot_has_gzip(context)) ||
+                (source == BootSource::Golden &&
+                 !golden_image_for_context(context))) {
                 last_error = kErrorBadSelection;
                 break;
             }
@@ -1555,7 +1559,9 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
                  !valid_sd_selection_path(context, path)) ||
                 (source != BootSource::Sd && path_length != 0) ||
                 (source == BootSource::Flash &&
-                 !flash_slot_has_gzip(context))) {
+                 !flash_slot_has_gzip(context)) ||
+                (source == BootSource::Golden &&
+                 !golden_image_for_context(context))) {
                 last_error = kErrorBadSelection;
                 break;
             }

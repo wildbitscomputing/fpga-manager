@@ -114,6 +114,19 @@ void set_defaults()
 void refresh_public_selections()
 {
     for (size_t i = 0; i < kBootContextCount; ++i) {
+        // Older firmware allowed GOLDEN to be saved for every context. Keep
+        // those journal records readable, but normalize obsolete selections
+        // to AUTO in RAM. The next metadata update persists the migration.
+        if (i != kGoldenRecoveryContext &&
+            metadata.selections[i].source ==
+                static_cast<uint8_t>(BootSource::Golden)) {
+            metadata.selections[i].source =
+                static_cast<uint8_t>(BootSource::Auto);
+            metadata.selections[i].path[0] = '\0';
+            std::printf(
+                "Context %u has no embedded recovery; using AUTO selection\n",
+                static_cast<unsigned>(i + 1));
+        }
         selections[i].source =
             static_cast<BootSource>(metadata.selections[i].source);
         std::snprintf(selections[i].path, sizeof(selections[i].path), "%s",
@@ -199,7 +212,8 @@ bool boot_config_set_selection(uint8_t context, BootSource source,
                                const char* path)
 {
     if (context >= kBootContextCount ||
-        !source_valid(static_cast<uint8_t>(source))) {
+        !source_valid(static_cast<uint8_t>(source)) ||
+        (source == BootSource::Golden && context != kGoldenRecoveryContext)) {
         return false;
     }
     MetadataRecord previous = metadata;

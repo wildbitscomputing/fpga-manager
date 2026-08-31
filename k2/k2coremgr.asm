@@ -4809,7 +4809,7 @@ help_line_left_right: .text "Left/Right  Catalog: context; Local: move one page"
 help_line_delete:   .text "Del/Bksp    Catalog: delete SD image; Local: parent directory",0
 help_line_s:        .text "S           Save selected default and run immediately",0
 help_line_r:        .text "R           Refresh the current view",0
-help_line_quit:     .text "Esc/Q       Restart the K2 through TinyVicky",0
+help_line_quit:     .text "Esc/Q       Restart the K2",0
 
 ; SuperBASIC-compatible text palette with the generated logo's requested
 ; green, cream, and dark trace in entries 3, 6, and 8.
