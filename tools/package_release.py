@@ -55,7 +55,6 @@ def main() -> None:
         (build_dir / "fpga_mgr_B3B.elf", "fpga_mgr_B3B.elf"),
         (ROOT / "k2" / "k2coremgr.pgz", "k2coremgr.pgz"),
         (ROOT / "k2" / "README.md", "K2-MANAGER.md"),
-        (ROOT / "README.md", "TECHNICAL.md"),
         (ROOT / "LICENSE", "LICENSE"),
     )
 
@@ -77,4 +76,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

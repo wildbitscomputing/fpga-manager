@@ -4,6 +4,7 @@
 #include <cstdint>
 
 constexpr size_t kBootContextCount = 4;
+constexpr uint8_t kGoldenRecoveryContext = 3;
 constexpr size_t kBootPathLength = 192;
 constexpr size_t kFlashLabelLength = 128;
 
