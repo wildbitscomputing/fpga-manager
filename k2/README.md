@@ -1,4 +1,4 @@
-# K2 FPGA Manager and flash uploader
+# K2 FPGA Manager
 
 `k2coremgr.pgz` is the interactive K2 FPGA Manager. It obtains the image
 catalog directly from the RP2040, including files on the manager's
@@ -45,7 +45,7 @@ RP2040 core catalog controls:
 | `Enter` | Run the highlighted entry once without changing the persistent boot selection |
 | `F7` | Save the selected entry as the default |
 | `S` | Save the selected entry as default and run it |
-| `Delete`/D | Ask for confirmation, then permanently delete the highlighted manager-SD image |
+| `Delete`/`D` | Ask for confirmation, then permanently delete the highlighted manager-SD image |
 
 The catalog may browse and maintain any of the four contexts, but `Enter` and
 `S` can run only the context selected by the physical DIP switches. Attempting
@@ -106,9 +106,9 @@ replaceable flash slot for the displayed context. Raw `.bin` files and gzip
 files larger than the 2 MiB slot are rejected before erasure. The flash upload
 uses the same two-pass local-file validation, acknowledged byte counts, CRC-32,
 gzip trailer check, page readback, first-page-last commit, filename metadata,
-and progress display as the standalone uploader. It does not change the saved
-boot selection or run the core. This path remains available when the RP2040 SD
-card is absent; `F5` then reports that manager-SD installation is unavailable.
+and progress display. It does not change the saved boot selection or run the
+core. This path remains available when the RP2040 SD card is absent; `F5` then
+reports that manager-SD installation is unavailable.
 
 During either operation, the validation pass reports bytes scanned. The write
 pass shows a percentage and the byte count acknowledged by the RP2040 rather
