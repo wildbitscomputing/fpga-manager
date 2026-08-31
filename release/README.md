@@ -38,7 +38,7 @@ embedded recovery core.
 ## Install with an SWD probe
 
 This is an alternative update path, e.g. when the internal header for the BOOTSEL
-update is missing for some reason.
+update is damaged or your PC does not recognize the USB device.
 
 Connect a CMSIS-DAP probe, such as the Raspberry Pi Debug Probe, to the
 RP2040's SWDIO, SWCLK, and GND signals. From a command prompt configured for
@@ -54,9 +54,6 @@ or:
 ```text
 openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" -c "program fpga_mgr_B3B.elf verify reset exit"
 ```
-
-Successful output includes `Programming Finished`, `Verified OK`, and a target
-reset.
 
 ## Install and start the K2 utility
 
@@ -90,7 +87,7 @@ K2's local SD-card browser.
 | `Enter` | Run the selected core once without changing the default |
 | `F7` | Save the selected catalog entry as the default |
 | `S` | Save the selection as the default and run it |
-| `Delete`/D | Confirm and delete the selected image from the RP2040 SD card |
+| `Delete`/`D` | Confirm and delete the selected image from the RP2040 SD card |
 
 `Enter` and `S` can only run the context selected by the physical DIP
 switches. The manager can browse another context and use `F7` to prepare its
