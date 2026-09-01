@@ -4,7 +4,7 @@
 #include <cstdint>
 
 constexpr size_t kBootContextCount = 4;
-constexpr uint8_t kGoldenRecoveryContext = 3;
+constexpr uint8_t kGoldenRecoveryContext = 0;
 constexpr size_t kBootPathLength = 192;
 constexpr size_t kFlashLabelLength = 128;
 
@@ -35,7 +35,8 @@ struct BootRuntimeStatus {
 };
 
 // Loads the newest valid metadata journal record. Invalid or erased metadata
-// safely produces AUTO selections and empty flash labels.
+// selects the embedded recovery image for context 1, AUTO for contexts 2-4,
+// and empty flash labels.
 void boot_config_init();
 
 const BootSelection& boot_config_selection(uint8_t context);
