@@ -15,7 +15,7 @@ CORE_MGR_AUTOTEST_DIRECT_FLASH = 0
 CORE_MGR_AUTOTEST_LOG = 0
 CORE_MGR_AUTOTEST_DELETE = 0
 CORE_MGR_AUTOTEST_GOLDEN_ONCE = 0
-CORE_MGR_AUTOTEST_CONTEXT = 3
+CORE_MGR_AUTOTEST_CONTEXT = 0
 CORE_MGR_LOCAL_DRIVE = 0
             .endweak
 
@@ -205,18 +205,22 @@ ENTRY_NAME_CAPACITY      = ENTRY_SIZE-ENTRY_NAME
 
 VIEW_CATALOG            = 0
 VIEW_LOCAL              = 1
-LOCAL_ENTRY_BUFFER      = $2000
+; The local directory cache occupies the otherwise-unused RAM immediately
+; below the PGZ load address at $8000.  Keep the count below 256 because the
+; cursor and entry indices are bytes.
+LOCAL_ENTRY_BUFFER      = $4000
 LOCAL_ENTRY_SIZE        = 64
 LOCAL_ENTRY_FLAGS       = 0
 LOCAL_ENTRY_NAME        = 1
 LOCAL_ENTRY_NAME_MAX    = 62
-LOCAL_MAX_ENTRIES       = 64
+LOCAL_MAX_ENTRIES       = 255
 LOCAL_FLAG_DIRECTORY    = $01
 LOCAL_FLAG_IMAGE        = $02
 
-; Large work areas live below the PGZ image. The export pathname buffers
-; intentionally overlay the local-directory cache: exporting is available
-; only in catalog view, and the local directory is reread afterward.
+            .cerror LOCAL_ENTRY_BUFFER + LOCAL_ENTRY_SIZE * LOCAL_MAX_ENTRIES > $8000, "Local directory cache overlaps the PGZ image"
+
+; Large work areas live below the PGZ image. Exporting is available only in
+; catalog view, and the local directory is reread afterward.
 EXPORT_PATH             = $2000
 EXPORT_DESTINATION      = $20c0
 EXPORT_TEMPORARY        = $2140
@@ -254,7 +258,7 @@ RUN:
             .elsif CORE_MGR_AUTOTEST_GOLDEN_ONCE != 0
             lda     #CORE_MGR_AUTOTEST_CONTEXT
             .else
-            lda     #3                  ; context 4 until boot status says otherwise
+            lda     #0                  ; context 1 until boot status says otherwise
             .endif
             sta     context
             stz     view_mode
@@ -320,7 +324,7 @@ autotest_golden_found:
             .elsif CORE_MGR_AUTOTEST_LOCAL != 0
             ; Hardware integration test: find fe.gz on the 65816-visible SD,
             ; stream it through the mailbox, and verify it appears in the
-            ; RP2040 context-4 catalog.
+            ; RP2040 context-1 catalog.
             jsr     read_local_directory
             bcs     autotest_failed
             stz     local_cursor
@@ -423,7 +427,7 @@ autotest_delete_verified:
             .endif
             .endif
             .else
-            ; Headless manufacturing/development check: catalog context 4 and
+            ; Headless manufacturing/development check: catalog context 1 and
             ; persist its flash entry. The host verifies
             ; autotest_result through the debug port, then reboots the RP2040
             ; and checks the UART log for a FLASH boot.
@@ -1226,6 +1230,7 @@ read_local_directory:
             stz     local_top
             stz     local_loaded
             stz     local_failed
+            stz     local_truncated
             lda     local_drive
             sta     KARGS_DIRECTORY_DRIVE
             stz     KARGS_FILE_COOKIE
@@ -1296,7 +1301,7 @@ local_directory_file:
             bne     local_directory_discard
             lda     local_count
             cmp     #LOCAL_MAX_ENTRIES
-            bcs     local_directory_discard
+            bcs     local_directory_truncated
             lda     local_name_length
             beq     local_directory_discard
             cmp     #LOCAL_ENTRY_NAME_MAX+1
@@ -1342,6 +1347,9 @@ local_store_flags:
             jsr     local_directory_read_next
             bra     local_directory_events
 
+local_directory_truncated:
+            lda     #1
+            sta     local_truncated
 local_directory_discard:
             lda     #<local_trash
             sta     KARGS_BUF
@@ -2531,6 +2539,12 @@ draw_local_target_context:
             jsr     ui_draw_bottom_border
             jsr     ui_draw_key_bar
             stz     MMU_IO_CTRL
+            lda     local_truncated
+            beq     draw_local_screen_done
+            lda     #<local_truncated_text
+            ldx     #>local_truncated_text
+            jsr     draw_status
+draw_local_screen_done:
             rts
 
 draw_local_entries:
@@ -4741,6 +4755,7 @@ ui_local_columns_text: .text "> Local SD directory / FPGA image",0
 help_columns_text:  .text "Key controls",0
 boot_log_columns_text: .text "RP2040 diagnostics (oldest to newest)",0
 local_sd_error_text: .text "Local SD unreadable or unsupported. Use a FAT-formatted card; R retries.",0
+local_truncated_text: .text "Directory has over 255 entries; only the first 255 are shown.",0
 manager_sd_unavailable_text: .text "Manager SD is absent. Use F3 on a gzip image to write context flash.",0
 boot_log_empty_text:.text "No boot diagnostics were recorded.",0
 boot_log_hint_text: .text "Current boot and runtime reconfiguration attempts.",0
@@ -4886,6 +4901,7 @@ local_top:          .byte 0
 local_draw_index:   .byte 0
 local_loaded:       .byte 0
 local_failed:       .byte 0
+local_truncated:    .byte 0
 manager_sd_available: .byte 0
 local_event_flags:  .byte 0
 local_name_length:  .byte 0

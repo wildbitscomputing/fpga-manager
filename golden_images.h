@@ -9,7 +9,7 @@ struct GoldenImageInfo {
     const char* label;
 };
 
-// Returns the immutable context-4 recovery image. Other contexts deliberately
+// Returns the immutable context-1 recovery image. Other contexts deliberately
 // have no embedded fallback and return nullptr.
 const GoldenImageInfo* golden_image_for_context(uint8_t context);
 

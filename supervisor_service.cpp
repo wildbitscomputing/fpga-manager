@@ -384,7 +384,7 @@ void rebuild_catalog(uint8_t context)
         if (f_opendir(&catalog_directory, directory) == FR_OK) {
             for (;;) {
                 // Reserve room for the replaceable flash slot and, in
-                // context 4, the immutable recovery entry.
+                // the recovery context, the immutable golden entry.
                 const size_t reserved_entries = golden ? 2 : 1;
                 if (catalog_count >= kCatalogCapacity - reserved_entries) {
                     break;

@@ -10,15 +10,31 @@ interface. From the K2 itself it can browse cores on either SD card, copy them
 between cards, install gzip images into replaceable flash, choose the next boot
 core, inspect the boot log, and start a core without changing the saved default.
 
+## What a context represents
+
+The K2 has four hardware contexts selected by the physical DIP switches. A
+context selects both an FPGA core and one 512 KiB slice of the K2's 2 MiB NOR
+flash. The core defines the hardware presented by the FPGA; the associated NOR
+slice supplies that context's firmware or operating environment. Changing the
+context can therefore change the identity of the machine, rather than merely
+selecting a different application.
+
+Current examples include the 65816-based K2 2x core and a 6809 core intended
+for NitrOS-9. Other platform-specific cores can use the remaining contexts and
+their independent NOR slices. Because the DIP switches also select the NOR
+slice, the manager can prepare another context but cannot switch the running
+machine into it in software. Select the context physically and restart the K2.
+
 ## System model
 
-The manager works with four physical FPGA contexts and three kinds of storage:
+The manager works with four physical FPGA contexts and four kinds of storage:
 
 | Storage | Role |
 | --- | --- |
 | RP2040 SD card | Core library, organized as `CNTX1/` through `CNTX4/`. |
 | K2/MicroKernel SD card | The user's normal filesystem and a convenient source or destination for core files. |
-| RP2040 flash | One replaceable 2 MiB gzip slot per context, plus firmware and one immutable context-4 recovery core. |
+| K2 NOR flash | Four 512 KiB slices selected by the physical context switches. This is separate from the RP2040's flash. |
+| RP2040 flash | One replaceable 2 MiB gzip slot per context, plus firmware and one immutable context-1 recovery core. |
 
 Each context has an independent saved boot choice. The available choices are:
 
@@ -27,28 +43,28 @@ Each context has an independent saved boot choice. The available choices are:
 - an exact SD path: try that file, then the replaceable flash slot;
 - `FLASH`: try the replaceable slot, then automatic SD discovery; or
 - `GOLDEN`: boot the immutable recovery image. This choice exists only in
-  context 4.
+  context 1.
 
-Context 4 adds the immutable recovery image after the mutable fallbacks above.
-Contexts 1 through 3 have no embedded core. If every mutable source for one
-of those contexts fails, move the physical switches to context 4 and use its
+Context 1 adds the immutable recovery image after the mutable fallbacks above.
+Contexts 2 through 4 have no embedded core. If every mutable source for one
+of those contexts fails, move the physical switches to context 1 and use its
 recovery environment to repair the affected SD directory, flash slot, or
 saved selection.
 
-The embedded image is the board-specific K2 context-4 cores:
+The embedded image is the board-specific K2 2x core assigned to context 1:
 
-- `fpga/B0C/context4.gz` for RevB0C hardware (also known as purple board)
-- `fpga/B3B/context4.gz` for RevB3B hardware (the old protoype boards, aka black board)
+- `fpga/B0C/context1.gz` for RevB0C hardware (also known as purple board)
+- `fpga/B3B/context1.gz` for RevB3B hardware (the old prototype boards, aka black board)
 
 The two FPGA bitstreams are not interchangeable and are clearly marked in the
 releases as two separate versions.
 
 ## Recovery workflow
 
-Context 4 is the maintenance and recovery environment for the whole machine:
+Context 1 is the normal 2x environment and the recovery path for the whole machine:
 
-1. Set the physical context switches to context 4.
-2. Restart the computer. If the saved context-4 sources are suspect, keep RESET
+1. Set the physical context switches to context 1.
+2. Restart the computer. If the saved context-1 sources are suspect, keep RESET
    held through the restart to force the embedded recovery core.
 3. Run `k2coremgr.pgz`.
 4. Use Left/Right to inspect another context. Copy a core from the local K2 SD
@@ -56,7 +72,7 @@ Context 4 is the maintenance and recovery environment for the whole machine:
    `F7`.
 5. Set the physical switches to the repaired context and restart the machine.
 
-The manager may maintain another context while context 4 is running, but it
+The manager may maintain another context while context 1 is running, but it
 cannot run that context in place: the DIP switches also select the corresponding
 FLASH area for the core to use and must be changed before boot.
 
@@ -73,7 +89,7 @@ CNTX4/
 ```
 
 The card is optional. Without it, the supervisor can still boot and update the
-replaceable flash slots, and context 4 can still use embedded recovery.
+replaceable flash slots, and context 1 can still use embedded recovery.
 
 Raw `.bin` and gzip-compressed `.bin.gz`/`.gz` cores are accepted from SD. The
 uncompressed FPGA payload must be exactly 9,730,652 bytes. Replaceable flash
@@ -122,13 +138,14 @@ only after the image is complete. An interrupted upload is therefore invalid
 rather than deceptively bootable.
 
 Boot selections and flash labels live in alternating CRC-protected metadata
-sectors. A corrupt or erased journal defaults to `AUTO`.
+sectors. A corrupt or erased journal defaults context 1 to `GOLDEN` and the
+other contexts to `AUTO`.
 
 The K2 does not route the FPGA `DONE` pin to the RP2040. The manager can prove
 that a bitstream has the right shape and that `INIT_B` remained healthy, but it
 cannot prove that the loaded core reached a useful application state. A core
 that lacks the supervisor mailbox also cannot be managed after it starts.
-Context-4 recovery is the independent way back from either case.
+Context-1 recovery is the independent way back from either case.
 
 ## Installing firmware
 
@@ -141,15 +158,18 @@ file:
 | Purple board and Wilbits boards | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
 | Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
 
-The release package's `README.md` contains the BOOTSEL and OpenOCD procedures.
+The release package's `K2-FPGA-MANAGER.pdf` contains the installation guide,
+operating reference, and recovery procedures.
 The UF2 and ELF include the same supervisor firmware and matching immutable
-context-4 recovery core. They do not overwrite the four replaceable slots.
+context-1 recovery core. They do not overwrite the four replaceable slots.
 
 ## Building
 
 Prerequisites are the Raspberry Pi Pico SDK, CMake and a build tool. Python 3,
-`picotool`, `64tass`, and [`just`](https://github.com/casey/just) support the
-combined UF2, K2 application, and release workflows.
+Node.js/npm, `picotool`, `64tass`, [`uv`](https://docs.astral.sh/uv/), and
+[`just`](https://github.com/casey/just) support the combined UF2, K2
+application, PDF documentation, and release workflows. The first PDF build
+downloads pinned Mermaid CLI and headless-browser versions through `npx`.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -166,7 +186,7 @@ just package-release
 ```
 
 The main build produces board-qualified `.uf2`, `.elf`, and `.bin` files in
-`build/`. The optional `_with_fpga.uf2` target also initializes context 4's
+`build/`. The optional `_with_fpga.uf2` target also initializes context 1's
 replaceable flash slot with the recovery core; the normal firmware already
 contains its own immutable copy.
 
@@ -175,15 +195,15 @@ the mailbox firmware version, and the release ZIP name. Release builds keep USB
 diagnostics enabled and disable the optional FTDI UART mirror. Configure with
 `-DFPGA_MGR_UART_DEBUG=ON` when that UART trace is needed.
 
-To substitute a different context-4 recovery image in a private build:
+To substitute a different context-1 recovery image in a private build:
 
 ```sh
 cmake -S . -B build \
-  -DGOLDEN_B0C_CONTEXT4=/path/to/core.bin.gz \
-  -DGOLDEN_B0C_CONTEXT4_LABEL=descriptive-name.bin.gz
+  -DGOLDEN_B0C_CONTEXT1=/path/to/core.bin.gz \
+  -DGOLDEN_B0C_CONTEXT1_LABEL=descriptive-name.bin.gz
 ```
 
-Use the corresponding `GOLDEN_B3B_CONTEXT4` variables for RevB3B.
+Use the corresponding `GOLDEN_B3B_CONTEXT1` variables for RevB3B.
 
 ## Runtime interface
 
@@ -203,7 +223,7 @@ version-by-version protocol changelog.
 
 - `fpga_mgr.cpp`, `supervisor_service.cpp`: boot and runtime supervisor logic
 - `boot_config.cpp`: persistent selections and replaceable-slot metadata
-- `fpga/B0C/`, `fpga/B3B/`: board-specific context-4 recovery payloads
+- `fpga/B0C/`, `fpga/B3B/`: board-specific context-1 recovery payloads
 - `k2/`: interactive manager and standalone uploader for the 65816
 - `release/README.md`: end-user installation and quick-reference guide
 - `docs/core-bundles-and-loader.md`: future bundle/loader architecture notes

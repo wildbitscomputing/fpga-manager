@@ -3,7 +3,7 @@
 `k2coremgr.pgz` is the interactive K2 FPGA Manager. It obtains the image
 catalog directly from the RP2040, including files on the manager's
 configuration SD card, the replaceable flash slot, and the embedded recovery
-image when browsing context 4. Contexts 1 through 3 have no embedded core.
+image when browsing context 1. Contexts 2 through 4 have no embedded core.
 The manager marks the persistent selection with `*` and the source that
 actually booted with `+`; `>` is the movable cursor.
 
@@ -51,7 +51,9 @@ The catalog may browse and maintain any of the four contexts, but `Enter` and
 `S` can run only the context selected by the physical DIP switches. Attempting
 to run another context displays an explanatory message and leaves the running
 FPGA and saved selections unchanged. Use `F7` if the intention is only to set
-that other context's default for its next DIP-selected boot.
+that other context's default for its next DIP-selected boot. The switches select
+both the FPGA context and its 512 KiB slice of the K2's 2 MiB NOR flash, so a
+complete context change requires changing the switches and restarting the K2.
 
 Catalog-view `F3` works only when the highlighted catalog entry has source `SD` and format
 `gzip`. `AUTO`, `FLASH`, `GOLDEN`, and raw `.bin` entries cannot be copied this
@@ -134,12 +136,12 @@ flash selection can report:
 
 ```text
 Policy: FLASH
-Try FLASH slot 4
+Try FLASH slot 1
 Reject: data after gzip member is not erased
-FLASH slot 4 failed
+FLASH slot 1 failed
 Fallback: FLASH -> automatic SD
-Try SD: CNTX4/context4.bin
-Loaded SD: CNTX4/WildbitsK2_example.bin.gz
+Try SD: CNTX1/context1.bin
+Loaded SD: CNTX1/WildbitsK2_example.bin.gz
 ```
 
 The log is a bounded RAM buffer. It is cleared whenever the RP2040 reboots and

@@ -109,14 +109,21 @@ void set_defaults()
     for (StoredSelection& selection : metadata.selections) {
         selection.source = static_cast<uint8_t>(BootSource::Auto);
     }
+    // A fresh installation boots the current 2x environment in physical
+    // context 1. Mutable SD and flash images remain available through AUTO or
+    // as explicit selections in the K2 manager.
+    metadata.selections[kGoldenRecoveryContext].source =
+        static_cast<uint8_t>(BootSource::Golden);
 }
 
 void refresh_public_selections()
 {
     for (size_t i = 0; i < kBootContextCount; ++i) {
-        // Older firmware allowed GOLDEN to be saved for every context. Keep
-        // those journal records readable, but normalize obsolete selections
-        // to AUTO in RAM. The next metadata update persists the migration.
+        // Older firmware placed GOLDEN in context 4 and allowed it to be saved
+        // for every context. Keep those journal records readable, but
+        // normalize selections for contexts without the current embedded
+        // recovery image to AUTO in RAM. The next metadata update persists the
+        // migration.
         if (i != kGoldenRecoveryContext &&
             metadata.selections[i].source ==
                 static_cast<uint8_t>(BootSource::Golden)) {
@@ -197,7 +204,7 @@ void boot_config_init()
     } else {
         set_defaults();
         active_offset = kMetadataOffsetB;
-        std::printf("Boot metadata absent or invalid; using AUTO selections\n");
+        std::printf("Boot metadata absent or invalid; using default selections\n");
     }
     refresh_public_selections();
 }

@@ -11,6 +11,8 @@ build_*/
 build-*/
 .cache/*
 .DS_Store
+__pycache__/
+*.py[cod]
 fpga/*.bin
 fpga/*.gz
 !fpga/B0C/*.gz
