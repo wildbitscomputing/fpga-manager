@@ -119,12 +119,10 @@ void set_defaults()
 void refresh_public_selections()
 {
     for (size_t i = 0; i < kBootContextCount; ++i) {
-        // Older firmware placed GOLDEN in context 4 and allowed it to be saved
-        // for every context. Keep those journal records readable, but
-        // normalize selections for contexts without the current embedded
-        // recovery image to AUTO in RAM. The next metadata update persists the
-        // migration.
-        if (i != kGoldenRecoveryContext &&
+        // Historical firmware placed GOLDEN in context 4. Contexts 1 and 4
+        // now intentionally expose the same embedded recovery payload; keep
+        // those records, while normalizing unsupported contexts to AUTO.
+        if (!context_has_golden_recovery(static_cast<uint8_t>(i)) &&
             metadata.selections[i].source ==
                 static_cast<uint8_t>(BootSource::Golden)) {
             metadata.selections[i].source =
@@ -220,7 +218,8 @@ bool boot_config_set_selection(uint8_t context, BootSource source,
 {
     if (context >= kBootContextCount ||
         !source_valid(static_cast<uint8_t>(source)) ||
-        (source == BootSource::Golden && context != kGoldenRecoveryContext)) {
+        (source == BootSource::Golden &&
+         !context_has_golden_recovery(context))) {
         return false;
     }
     MetadataRecord previous = metadata;

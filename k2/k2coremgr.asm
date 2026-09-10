@@ -1,4 +1,4 @@
-; K2 FPGA Manager - inspect and select RP2040 FPGA boot images.
+; K2 Core Manager - inspect and select RP2040 FPGA boot images.
 ;
 ; PGZ application for the F256K2.  It queries the manager-side SD catalog,
 ; replaceable flash slot, embedded golden image, persistent selection, and
@@ -24,6 +24,7 @@ KERNEL_READ_DATA        = $ff04
 KERNEL_READ_EXT         = $ff08
 KERNEL_YIELD            = $ff0c
 KERNEL_PUTCH            = $ff10
+KERNEL_CHDIR            = $ff1c
 KERNEL_FILE_OPEN        = $ff5c
 KERNEL_FILE_READ        = $ff60
 KERNEL_FILE_WRITE       = $ff64
@@ -48,6 +49,7 @@ KARGS_BUF               = $fb
 KARGS_BUFLEN            = $fd
 
 EVENT_KEY_PRESSED       = $08
+EVENT_KEY_RELEASED      = $0a
 EVENT_FILE_NOT_FOUND    = $28
 EVENT_FILE_OPENED       = $2a
 EVENT_FILE_DATA         = $2c
@@ -83,6 +85,7 @@ KEY_DELETE              = $91
 KEY_BACKSPACE           = $92
 KEY_TAB                 = $93
 KEY_ESC                 = $95
+KEY_BREAK               = $bc            ; K2 RUN/STOP key
 KEY_UP                  = $b6
 KEY_DOWN                = $b7
 KEY_LEFT                = $b8
@@ -163,24 +166,62 @@ ZP_TIMEOUT2             = $24
 ZP_TIMEOUT3             = $25
 
 TEXT_BUFFER             = $c000
-; Three-color UI shared with the generated logo: green/cream on black.
-UI_COLOR_NORMAL         = $30            ; green on black
-UI_COLOR_HIGHLIGHT      = $03            ; black on green
-UI_COLOR_FRAME          = $60            ; cream on black
-UI_COLOR_KEY_BAR        = $06            ; black on cream
-UI_BOX_LEFT             = 5
-UI_BOX_RIGHT            = 74
-UI_LIST_LINE            = 11
-UI_MAX_ENTRIES          = 32
-HELP_LINE_COUNT         = 14
+; 80 x 60 Wildbits UI. Attribute nibbles are foreground/background palette
+; indices respectively; palette entry 0 is the dark-blue canvas.
+UI_COLOR_NORMAL         = $20            ; off-white on blue
+UI_COLOR_LABEL          = $10            ; cyan on blue
+UI_COLOR_ACCENT         = $30            ; amber on blue
+UI_COLOR_ORANGE         = $40            ; orange on blue
+UI_COLOR_SUCCESS        = $50            ; green on blue
+UI_COLOR_ERROR          = $60            ; red on blue
+UI_COLOR_DIM            = $70            ; muted blue on blue
+UI_COLOR_HIGHLIGHT      = $38            ; amber on selection blue
+UI_COLOR_SUCCESS_SELECTED = $58          ; green on selection blue
+UI_COLOR_ORANGE_SELECTED  = $48          ; orange on selection blue
+UI_COLOR_FRAME          = UI_COLOR_LABEL
+UI_COLOR_KEY_BAR        = UI_COLOR_ACCENT
+; Determinate progress uses green foreground glyphs for the completed side
+; and plain spaces on the selection-blue background for the remainder.
+UI_COLOR_PROGRESS_EMPTY  = $08
+UI_COLOR_PROGRESS_ACTIVE = UI_COLOR_SUCCESS_SELECTED
+KEY_BAR_TOGGLE          = $01
+UI_SCREEN_ROWS          = 60
+UI_HEADER_LINE          = 2
+UI_STATUS_LINE          = 5
+UI_PATH_LINE            = 7
+UI_FRAME_TOP_LINE       = 10
+UI_COLUMNS_LINE         = 11
+UI_SEPARATOR_LINE       = 12
+UI_BOX_LEFT             = 3
+UI_BOX_RIGHT            = 76
+UI_LIST_LINE            = 13
+UI_MAX_ENTRIES          = 39
 UI_BOTTOM_LINE          = UI_LIST_LINE+UI_MAX_ENTRIES
-UI_PROGRESS_LABEL_LINE = UI_BOTTOM_LINE+4
-UI_PROGRESS_BAR_LINE   = UI_BOTTOM_LINE+6
-UI_PROGRESS_DETAIL_LINE = UI_BOTTOM_LINE+8
-; One cell for each column between the catalog's left and right borders.
-UI_PROGRESS_BAR_WIDTH  = UI_BOX_RIGHT-UI_BOX_LEFT-1
-UI_KEY_LINE             = 59
+UI_STATUS_MESSAGE_LINE  = 54
+UI_KEY_LINE             = 56
+UI_KEY_LINE_2           = 57
+UI_KEY_LINE_3           = 59
+UI_HELP_LEFT            = 5
+UI_HELP_RIGHT           = 74
+UI_HELP_TOP             = 15
+UI_HELP_BOTTOM          = 47
+UI_MODAL_LEFT           = 10
+UI_MODAL_RIGHT          = 69
+UI_MODAL_TOP            = 20
+UI_MODAL_BOTTOM         = 36
+UI_PROGRESS_TITLE_LINE  = 22
+UI_PROGRESS_NAME_LINE   = 25
+UI_PROGRESS_STATUS_LINE = 28
+UI_PROGRESS_BAR_LINE    = 31
+UI_PROGRESS_HINT_LINE   = 34
+UI_PROGRESS_BAR_WIDTH   = 31
 LOCAL_PAGE_JUMP         = 10
+PROGRESS_UPDATE_MASK    = $07            ; redraw every eight transfer chunks
+
+PROGRESS_KIND_SCAN      = 1
+PROGRESS_KIND_MANAGER   = 2
+PROGRESS_KIND_FLASH     = 3
+PROGRESS_KIND_EXPORT    = 4
 
 COPY_STATE_ERASING      = 1
 COPY_STATE_WRITING      = 2
@@ -188,12 +229,24 @@ COPY_STATE_FINALIZING   = 3
 COPY_STATE_DONE         = 4
 COPY_STATE_FAILED       = 5
 
-BOX_TL                  = 169
-BOX_TR                  = 170
-BOX_BL                  = 171
-BOX_BR                  = 172
-BOX_H                   = 173
-BOX_V                   = 174
+GLYPH_CURSOR            = 250            ; small right triangle
+GLYPH_DEFAULT           = 222            ; check mark
+GLYPH_BOOTED            = 180            ; filled circle
+GLYPH_SEPARATOR         = 182            ; centered dot
+GLYPH_PROGRESS_FIRST    = 134            ; 1/8 filled, left to right
+GLYPH_PROGRESS_FULL     = 7              ; solid block
+
+BOX_TL                  = 160
+BOX_TR                  = 161
+BOX_BL                  = 162
+BOX_BR                  = 163
+BOX_H                   = 150
+BOX_V                   = 130
+BOX_TEE_LEFT            = 154
+BOX_TEE_TOP             = 155
+BOX_CROSS               = 156
+BOX_TEE_BOTTOM          = 157
+BOX_TEE_RIGHT           = 158
 
 ENTRY_SIZE              = 64
 ENTRY_SOURCE            = 0
@@ -225,6 +278,8 @@ EXPORT_PATH             = $2000
 EXPORT_DESTINATION      = $20c0
 EXPORT_TEMPORARY        = $2140
 EXPORT_BASENAME         = $21c0
+EXPORT_BACKUP           = $2240
+EXPORT_BACKUP_NAME      = $22c0
 CRC_TABLE0              = $3000
 CRC_TABLE1              = $3100
 CRC_TABLE2              = $3200
@@ -268,6 +323,10 @@ RUN:
             sta     local_path
             stz     local_path+1
             stz     local_loaded
+            stz     catalog_refreshing
+            stz     highlight_found
+            lda     #$ff
+            sta     highlight_source
 
             .if CORE_MGR_AUTOTEST == 0
             lda     #<banner_text
@@ -547,11 +606,7 @@ menu_loop:
             cmp     #KEY_DELETE
             beq     delete_key
             cmp     #KEY_BACKSPACE
-            beq     parent_key
-            cmp     #KEY_ESC
-            bne     +
-            jmp     restart_computer
-+
+            beq     delete_key
             lda     EVENT_KEY_ASCII
             cmp     #$10                ; MicroKernel cooked Up (Ctrl-P)
             beq     cursor_up
@@ -563,10 +618,10 @@ menu_loop:
             beq     next_context
             cmp     #KEY_ENTER
             beq     run_highlighted
-            cmp     #27
-            bne     +
-            jmp     restart_computer
-+
+            cmp     #8                  ; DEL is reported as Backspace
+            beq     delete_key
+            cmp     #127
+            beq     delete_key
             cmp     #'c'
             beq     next_context
             cmp     #'r'
@@ -600,6 +655,7 @@ catalog_cursor_up:
             lda     cursor_index
             beq     menu_loop
             dec     cursor_index
+            jsr     adjust_catalog_top
             jsr     draw_entries
             bra     menu_loop
 
@@ -620,6 +676,7 @@ catalog_cursor_down:
             cmp     catalog_count
             bcs     menu_loop
             sta     cursor_index
+            jsr     adjust_catalog_top
             jsr     draw_entries
             bra     menu_loop
 
@@ -789,7 +846,7 @@ switch_to_catalog:
 
 show_help:
             jsr     draw_help_screen
-            jsr     wait_key
+            jsr     wait_break_key
             lda     view_mode
             beq     show_help_catalog
             jsr     draw_local_screen
@@ -801,7 +858,7 @@ show_help_catalog:
 show_boot_log:
             jsr     draw_boot_log_screen
             bcs     show_boot_log_error
-            jsr     wait_key
+            jsr     wait_break_key
 show_boot_log_restore:
             lda     view_mode
             beq     show_boot_log_catalog
@@ -843,7 +900,15 @@ export_highlighted_to_local:
             bne     export_highlighted_done
             jsr     export_catalog_entry_to_local
             bcs     export_highlighted_failed
-            stz     local_loaded
+            ; Refresh the same selected directory now, while local_path still
+            ; identifies the export target. Tab can then display the new file
+            ; without relying on a deferred/stale directory cache refresh.
+            jsr     read_local_directory
+            bcs     export_highlighted_failed
+            jsr     highlight_exported_local_file
+            ; Exporting does not alter the RP2040 catalog. Keep its existing
+            ; cursor and scroll position rather than attempting to match the
+            ; local destination path against a manager-SD catalog entry.
             jsr     draw_screen
             lda     #<export_done_text
             ldx     #>export_done_text
@@ -869,11 +934,18 @@ delete_highlighted:
             jmp     menu_loop
 delete_show_confirmation:
             jsr     draw_delete_confirmation
+delete_confirmation_key:
             jsr     wait_key
             lda     EVENT_KEY_ASCII
             ora     #$20
             cmp     #'y'
             beq     delete_confirmed
+            lda     EVENT_KEY_RAW
+            cmp     #KEY_BREAK
+            beq     delete_cancelled
+            cmp     #KEY_ESC             ; optional external-keyboard alias
+            bne     delete_confirmation_key
+delete_cancelled:
             jsr     draw_screen
             lda     #<delete_cancelled_text
             ldx     #>delete_cancelled_text
@@ -916,9 +988,20 @@ copy_local_to_manager_sd:
             lda     #TARGET_SD_NAMED
             sta     transfer_target
             jsr     install_local_entry
-            bcs     command_failure
+            bcc     copy_local_completed
+            lda     transfer_cancelled
+            beq     command_failure
+            jsr     draw_local_screen
+            lda     #<scan_cancelled_text
+            ldx     #>scan_cancelled_text
+            jsr     draw_status
+            jmp     menu_loop
+copy_local_completed:
             lda     #1
             sta     highlight_pending
+            stz     highlight_found
+            lda     #SOURCE_SD
+            sta     highlight_source
             stz     view_mode
             jsr     load_catalog
             bcs     command_failure
@@ -958,6 +1041,14 @@ flash_local_highlighted:
             jsr     draw_status
             jmp     menu_loop
 local_flash_failed:
+            lda     transfer_cancelled
+            beq     local_flash_error
+            jsr     draw_local_screen
+            lda     #<scan_cancelled_text
+            ldx     #>scan_cancelled_text
+            jsr     draw_status
+            jmp     menu_loop
+local_flash_error:
             lda     mailbox_error
             cmp     #$e6
             bne     command_failure
@@ -1030,9 +1121,12 @@ command_failure_generic:
             jmp     menu_loop
 
 restart_computer:
+            lda     EVENT_KEY_RAW
+            sta     restart_key_raw
             lda     #<restart_computer_text
             ldx     #>restart_computer_text
             jsr     draw_status
+            jsr     wait_restart_key_release
             stz     MMU_IO_CTRL
             lda     #$de
             sta     VKY_RESET_KEY0
@@ -1060,6 +1154,7 @@ load_catalog:
             jsr     catalog_begin
             bcs     load_catalog_done
             stz     cursor_index
+            stz     catalog_top
             stz     catalog_index
 load_catalog_loop:
             lda     catalog_index
@@ -1070,10 +1165,18 @@ load_catalog_loop:
             jsr     cache_catalog_entry
             lda     highlight_pending
             beq     load_catalog_selected
+            lda     highlight_source
+            cmp     #$ff
+            beq     load_catalog_highlight_name
+            cmp     response_buffer+10
+            bne     load_catalog_next
+load_catalog_highlight_name:
             jsr     catalog_matches_local_filename
             bcc     load_catalog_next
             lda     catalog_index
             sta     cursor_index
+            lda     #1
+            sta     highlight_found
             bra     load_catalog_next
 load_catalog_selected:
             lda     response_buffer+13
@@ -1088,6 +1191,8 @@ load_catalog_next:
 
 load_catalog_runtime:
             stz     highlight_pending
+            lda     #$ff
+            sta     highlight_source
             stz     running_valid
             stz     running_name
             jsr     get_boot_status
@@ -1115,6 +1220,7 @@ load_running_done:
             lda     #0
             sta     running_name,y
 load_catalog_ok:
+            jsr     adjust_catalog_top
             clc
 load_catalog_done:
             rts
@@ -1305,7 +1411,11 @@ local_directory_file:
             lda     local_name_length
             beq     local_directory_discard
             cmp     #LOCAL_ENTRY_NAME_MAX+1
-            bcs     local_directory_discard
+            bcc     local_directory_store
+            lda     #1
+            sta     local_truncated
+            bra     local_directory_discard
+local_directory_store:
             lda     local_count
             jsr     local_entry_pointer_a
             inc     ZP_POINTER
@@ -1431,6 +1541,36 @@ local_entry_pointer_a:
             sta     ZP_POINTER+1
             rts
 
+; Select the just-exported basename in the refreshed local directory cache so
+; Tab makes the result visible even when the directory spans several pages.
+highlight_exported_local_file:
+            stz     local_draw_index
+highlight_exported_local_loop:
+            lda     local_draw_index
+            cmp     local_count
+            bcs     highlight_exported_local_done
+            jsr     local_entry_pointer_a
+            ldy     #LOCAL_ENTRY_NAME
+            ldx     #0
+highlight_exported_local_compare:
+            lda     (ZP_POINTER),y
+            cmp     EXPORT_BASENAME,x
+            bne     highlight_exported_local_next
+            cmp     #0
+            beq     highlight_exported_local_found
+            inx
+            iny
+            bra     highlight_exported_local_compare
+highlight_exported_local_next:
+            inc     local_draw_index
+            bra     highlight_exported_local_loop
+highlight_exported_local_found:
+            lda     local_draw_index
+            sta     local_cursor
+            jsr     adjust_local_top
+highlight_exported_local_done:
+            rts
+
 ; ZP_POINTER addresses the flags byte of the entry.
 local_filename_is_image:
             lda     local_name_length
@@ -1499,6 +1639,22 @@ local_test_image_match:
             sec
             rts
 
+adjust_catalog_top:
+            lda     cursor_index
+            cmp     catalog_top
+            bcs     +
+            sta     catalog_top
+            rts
++           sec
+            sbc     catalog_top
+            cmp     #UI_MAX_ENTRIES
+            bcc     +
+            lda     cursor_index
+            sec
+            sbc     #UI_MAX_ENTRIES-1
+            sta     catalog_top
++           rts
+
 adjust_local_top:
             lda     local_cursor
             cmp     local_top
@@ -1518,9 +1674,32 @@ adjust_local_top:
 local_append_directory:
             jsr     local_entry_pointer
             jsr     local_path_length
+            sta     local_append_base_length
+            stz     local_append_name_length
+            ldy     #LOCAL_ENTRY_NAME
+local_append_measure_name:
+            lda     (ZP_POINTER),y
+            beq     local_append_measure_done
+            inc     local_append_name_length
+            iny
+            bra     local_append_measure_name
+local_append_measure_done:
+            lda     local_append_base_length
             tax
-            cpx     #126
+            beq     local_append_measure_name_only
+            lda     local_path-1,x
+            cmp     #'/'
+            beq     local_append_measure_name_only
+            inx
+local_append_measure_name_only:
+            txa
+            clc
+            adc     local_append_name_length
+            adc     #1                  ; trailing slash; NUL occupies next byte
+            cmp     #128
             bcs     local_path_too_long
+
+            ldx     local_append_base_length
             cpx     #0
             beq     local_append_name
             lda     local_path-1,x
@@ -1534,8 +1713,6 @@ local_append_name:
 local_append_name_loop:
             lda     (ZP_POINTER),y
             beq     local_append_slash
-            cpx     #126
-            bcs     local_path_too_long
             sta     local_path,x
             inx
             iny
@@ -1598,6 +1775,7 @@ install_prepared_entry:
             stz     transfer_stream
             stz     upload_started
             stz     transfer_failed
+            stz     transfer_cancelled
             stz     transfer_progress
             stz     progress_activity
             ldx     #7
@@ -1622,6 +1800,8 @@ transfer_event_loop:
             bra     transfer_event_loop
 transfer_have_event:
             lda     EVENT_TYPE
+            cmp     #EVENT_KEY_PRESSED
+            beq     transfer_key_pressed
             cmp     #EVENT_FILE_OPENED
             beq     transfer_opened
             cmp     #EVENT_FILE_DATA
@@ -1635,6 +1815,24 @@ transfer_have_event:
             cmp     #EVENT_FILE_ERROR
             beq     transfer_file_failure
             bra     transfer_event_loop
+
+; Validation is read-only and can be cancelled safely. Once the second pass
+; starts changing manager SD or flash state, input remains deliberately locked.
+transfer_key_pressed:
+            lda     transfer_phase
+            bne     transfer_event_loop
+            lda     transfer_stream
+            beq     transfer_event_loop
+            lda     EVENT_KEY_RAW
+            cmp     #KEY_BREAK
+            beq     transfer_cancel_scan
+            cmp     #KEY_ESC             ; optional external-keyboard alias
+            bne     transfer_event_loop
+transfer_cancel_scan:
+            lda     #1
+            sta     transfer_cancelled
+            sta     transfer_failed
+            jmp     transfer_close_file
 
 transfer_opened:
             lda     EVENT_STREAM
@@ -1711,7 +1909,7 @@ transfer_data:
             jsr     scan_chunk
             inc     transfer_progress
             lda     transfer_progress
-            and     #$7f
+            and     #PROGRESS_UPDATE_MASK
             bne     transfer_request_next
             jsr     draw_scan_progress
             bra     transfer_request_next
@@ -1754,7 +1952,7 @@ transfer_data_accepted:
             bpl     -
             inc     transfer_progress
             lda     transfer_progress
-            and     #$7f
+            and     #PROGRESS_UPDATE_MASK
             bne     transfer_progress_resync_check
             jsr     draw_install_progress
 transfer_progress_resync_check:
@@ -2319,81 +2517,48 @@ draw_help_screen:
             jsr     ui_clear_screen
             lda     #2
             sta     MMU_IO_CTRL
-            jsr     ui_draw_logo
-            ldx     #32
-            ldy     #5
+            jsr     ui_draw_header
+            ldx     #20
+            ldy     #UI_HEADER_LINE
             jsr     ui_set_xy
+            lda     #UI_COLOR_LABEL
+            sta     ui_color
             lda     #<ui_help_title_text
             ldx     #>ui_help_title_text
-            jsr     ui_puts
-            ldx     #7
-            ldy     #9
-            jsr     ui_set_xy
-            lda     #<help_columns_text
-            ldx     #>help_columns_text
-            jsr     ui_puts
-            jsr     ui_draw_top_border
+            jsr     ui_puts_colored
+            jsr     ui_draw_help_frame
             stz     help_line_index
-draw_help_frame_row:
-            lda     help_line_index
-            clc
-            adc     #UI_LIST_LINE
+draw_help_layout_item:
+            ldx     help_line_index
+            lda     ui_help_layout,x
+            cmp     #$ff
+            beq     draw_help_layout_done
             tay
-            lda     #UI_COLOR_NORMAL
-            jsr     ui_set_line_color
-            ldx     #UI_BOX_LEFT
-            ldy     ui_row
-            jsr     ui_set_xy
-            lda     #BOX_V
-            jsr     ui_putc
-            ldx     #UI_BOX_RIGHT
-            ldy     ui_row
-            jsr     ui_set_xy
-            lda     #BOX_V
-            jsr     ui_putc
-            inc     help_line_index
-            lda     help_line_index
-            cmp     #UI_MAX_ENTRIES
-            bcc     draw_help_frame_row
-            stz     help_line_index
-draw_help_line:
-            lda     help_line_index
-            asl     a
-            tax
-            lda     ui_help_line_ptrs,x
+            inx
+            lda     ui_help_layout,x
+            sta     ZP_TIMEOUT2
+            inx
+            lda     ui_help_layout,x
+            sta     ui_color
+            inx
+            lda     ui_help_layout,x
             sta     status_pointer
             inx
-            lda     ui_help_line_ptrs,x
+            lda     ui_help_layout,x
             sta     status_pointer+1
-            ldx     #7
-            lda     help_line_index
-            clc
-            adc     #UI_LIST_LINE
-            tay
+            inx
+            stx     help_line_index
+            ldx     ZP_TIMEOUT2
             jsr     ui_set_xy
             lda     status_pointer
             ldx     status_pointer+1
-            jsr     ui_puts
-            inc     help_line_index
-            lda     help_line_index
-            cmp     #HELP_LINE_COUNT
-            bcc     draw_help_line
-            jsr     ui_draw_bottom_border
-            ldx     #5
-            ldy     #UI_BOTTOM_LINE+2
-            jsr     ui_set_xy
-            lda     #<help_hint_text
-            ldx     #>help_hint_text
-            jsr     ui_puts
-            lda     #UI_COLOR_KEY_BAR
-            ldy     #UI_KEY_LINE
-            jsr     ui_set_full_line_color
-            ldx     #0
-            ldy     #UI_KEY_LINE
-            jsr     ui_set_xy
+            jsr     ui_puts_colored
+            bra     draw_help_layout_item
+draw_help_layout_done:
+            jsr     ui_draw_help_legend
             lda     #<boot_log_key_bar_text
             ldx     #>boot_log_key_bar_text
-            jsr     ui_puts
+            jsr     ui_draw_key_line_1
             stz     MMU_IO_CTRL
             rts
 
@@ -2401,20 +2566,31 @@ draw_boot_log_screen:
             jsr     ui_clear_screen
             lda     #2
             sta     MMU_IO_CTRL
-            jsr     ui_draw_logo
-            ldx     #32
-            ldy     #5
+            jsr     ui_draw_header
+            ldx     #3
+            ldy     #UI_STATUS_LINE
             jsr     ui_set_xy
             lda     #<ui_boot_log_title_text
             ldx     #>ui_boot_log_title_text
             jsr     ui_puts
             ldx     #7
-            ldy     #9
+            ldy     #UI_COLUMNS_LINE
             jsr     ui_set_xy
             lda     #<boot_log_columns_text
             ldx     #>boot_log_columns_text
             jsr     ui_puts
-            jsr     ui_draw_top_border
+            jsr     ui_draw_plain_top_border
+            jsr     ui_draw_separator
+            ; The diagnostic entries are plain text rather than catalog rows,
+            ; so lay down the list interior and both vertical frame sides
+            ; before fetching them. Text is then written inside this frame.
+            stz     ui_entry_index
+draw_boot_log_frame_row:
+            jsr     draw_blank_entry
+            inc     ui_entry_index
+            lda     ui_entry_index
+            cmp     #UI_MAX_ENTRIES
+            bcc     draw_boot_log_frame_row
             stz     MMU_IO_CTRL
             stz     boot_log_index
             stz     boot_log_count
@@ -2460,22 +2636,14 @@ draw_boot_log_line:
             lda     #2
             sta     MMU_IO_CTRL
 draw_boot_log_finish:
-            jsr     ui_draw_bottom_border
-            ldx     #5
-            ldy     #UI_BOTTOM_LINE+2
+            jsr     ui_draw_plain_bottom_border
+            ldx     #3
+            ldy     #UI_STATUS_MESSAGE_LINE
             jsr     ui_set_xy
             lda     #<boot_log_hint_text
             ldx     #>boot_log_hint_text
             jsr     ui_puts
-            lda     #UI_COLOR_KEY_BAR
-            ldy     #UI_KEY_LINE
-            jsr     ui_set_full_line_color
-            ldx     #0
-            ldy     #UI_KEY_LINE
-            jsr     ui_set_xy
-            lda     #<boot_log_key_bar_text
-            ldx     #>boot_log_key_bar_text
-            jsr     ui_puts
+            jsr     ui_draw_return_hint
             stz     MMU_IO_CTRL
             clc
             rts
@@ -2488,15 +2656,9 @@ draw_local_screen:
             jsr     ui_clear_screen
             lda     #2
             sta     MMU_IO_CTRL
-            jsr     ui_draw_logo
-            ldx     #32
-            ldy     #5
-            jsr     ui_set_xy
-            lda     #<ui_local_title_text
-            ldx     #>ui_local_title_text
-            jsr     ui_puts
-            ldx     #5
-            ldy     #7
+            jsr     ui_draw_header
+            ldx     #3
+            ldy     #UI_STATUS_LINE
             jsr     ui_set_xy
             lda     manager_sd_available
             beq     draw_local_no_manager_sd
@@ -2513,16 +2675,13 @@ draw_local_target_context:
             clc
             adc     #'1'
             jsr     ui_putc
-            ldx     #7
-            ldy     #9
+            ldx     #3
+            ldy     #UI_PATH_LINE
             jsr     ui_set_xy
-            lda     #<ui_local_columns_text
-            ldx     #>ui_local_columns_text
-            jsr     ui_puts
-            jsr     ui_draw_top_border
-            ldx     #8
-            ldy     #UI_LIST_LINE-1
-            jsr     ui_set_xy
+            lda     #GLYPH_CURSOR
+            jsr     ui_putc
+            lda     #' '
+            jsr     ui_putc
             lda     local_drive
             clc
             adc     #'0'
@@ -2532,6 +2691,14 @@ draw_local_target_context:
             lda     #<local_path
             ldx     #>local_path
             jsr     ui_puts
+            ldx     #7
+            ldy     #UI_COLUMNS_LINE
+            jsr     ui_set_xy
+            lda     #<ui_local_columns_text
+            ldx     #>ui_local_columns_text
+            jsr     ui_puts
+            jsr     ui_draw_top_border
+            jsr     ui_draw_separator
             stz     MMU_IO_CTRL
             jsr     draw_local_entries
             lda     #2
@@ -2606,21 +2773,43 @@ draw_local_color:
             lda     local_draw_index
             cmp     local_cursor
             bne     +
-            lda     #'>'
-            bra     draw_local_marker
+            lda     #UI_COLOR_HIGHLIGHT
+            sta     ui_color
+            lda     #GLYPH_CURSOR
+            jsr     ui_putc_colored
+            bra     draw_local_marker_done
 +           lda     #' '
 draw_local_marker:
             jsr     ui_putc
+draw_local_marker_done:
             lda     #' '
             jsr     ui_putc
             lda     ui_entry_flags
             and     #LOCAL_FLAG_DIRECTORY
             beq     +
-            lda     #'/'
+            lda     #<source_dir_text
+            ldx     #>source_dir_text
+            bra     draw_local_source
++           lda     #<source_file_text
+            ldx     #>source_file_text
+draw_local_source:
+            pha
+            lda     local_draw_index
+            cmp     local_cursor
+            bne     +
+            lda     #UI_COLOR_HIGHLIGHT
+            bra     draw_local_source_color
++           lda     #UI_COLOR_LABEL
+draw_local_source_color:
+            sta     ui_color
+            pla
+            jsr     ui_puts_colored
+            ldx     #6
+draw_local_source_gap:
+            lda     #' '
             jsr     ui_putc
-            bra     draw_local_name
-+           lda     #' '
-            jsr     ui_putc
+            dex
+            bne     draw_local_source_gap
 draw_local_name:
             ; local_entry_pointer_a uses ZP_POINTER, which currently holds the
             ; text-screen destination established by ui_set_xy.  Preserve the
@@ -2659,16 +2848,9 @@ draw_screen:
             jsr     ui_clear_screen
             lda     #2
             sta     MMU_IO_CTRL
-            jsr     ui_draw_logo
-            ldx     #34
-            ldy     #5
-            jsr     ui_set_xy
-            lda     #<ui_title_text
-            ldx     #>ui_title_text
-            jsr     ui_puts
-
-            ldx     #5
-            ldy     #7
+            jsr     ui_draw_header
+            ldx     #3
+            ldy     #UI_STATUS_LINE
             jsr     ui_set_xy
             lda     #<context_text
             ldx     #>context_text
@@ -2677,10 +2859,12 @@ draw_screen:
             clc
             adc     #'1'
             jsr     ui_putc
-
-            ldx     #5
-            ldy     #8
-            jsr     ui_set_xy
+            lda     #' '
+            jsr     ui_putc
+            lda     #GLYPH_SEPARATOR
+            jsr     ui_putc
+            lda     #' '
+            jsr     ui_putc
             lda     #<running_text
             ldx     #>running_text
             jsr     ui_puts
@@ -2696,21 +2880,29 @@ draw_screen:
             jsr     ui_print_source
             lda     #' '
             jsr     ui_putc
-            lda     #<running_name
-            ldx     #>running_name
-            jsr     ui_puts
-            bra     draw_running_done
+            ldy     #0
+draw_running_name:
+            cpy     running_name_length
+            beq     draw_running_done
+            lda     ui_column
+            cmp     #79
+            bcs     draw_running_done
+            lda     running_name,y
+            jsr     ui_putc
+            iny
+            bra     draw_running_name
 draw_no_running:
             lda     #'-'
             jsr     ui_putc
 draw_running_done:
             ldx     #7
-            ldy     #9
+            ldy     #UI_COLUMNS_LINE
             jsr     ui_set_xy
             lda     #<ui_columns_text
             ldx     #>ui_columns_text
             jsr     ui_puts
             jsr     ui_draw_top_border
+            jsr     ui_draw_separator
             stz     MMU_IO_CTRL
             jsr     draw_entries
             lda     #2
@@ -2728,6 +2920,9 @@ draw_entries_loop:
             lda     ui_entry_index
             cmp     #UI_MAX_ENTRIES
             bcs     draw_entries_done
+            clc
+            adc     catalog_top
+            sta     catalog_draw_index
             cmp     catalog_count
             bcs     draw_empty_entry
             jsr     draw_catalog_entry
@@ -2742,7 +2937,7 @@ draw_entries_done:
             rts
 
 draw_catalog_entry:
-            lda     ui_entry_index
+            lda     catalog_draw_index
             sta     catalog_index
             jsr     catalog_entry_pointer
             ldy     #ENTRY_SOURCE
@@ -2751,7 +2946,7 @@ draw_catalog_entry:
             iny
             lda     (ZP_POINTER),y
             sta     ui_entry_flags
-            lda     ui_entry_index
+            lda     catalog_draw_index
             cmp     cursor_index
             bne     +
             lda     #UI_COLOR_HIGHLIGHT
@@ -2779,41 +2974,75 @@ draw_entry_color:
             jsr     ui_putc
             lda     #' '
             jsr     ui_putc
-            lda     ui_entry_index
+            lda     catalog_draw_index
             cmp     cursor_index
             bne     +
-            lda     #'>'
-            bra     draw_cursor_marker
+            lda     #UI_COLOR_HIGHLIGHT
+            sta     ui_color
+            lda     #GLYPH_CURSOR
+            jsr     ui_putc_colored
+            bra     draw_cursor_marker_done
 +           lda     #' '
 draw_cursor_marker:
             jsr     ui_putc
+draw_cursor_marker_done:
             lda     ui_entry_flags
             and     #FLAG_SELECTED
             beq     +
-            lda     #'*'
-            bra     draw_selected_marker
+            lda     catalog_draw_index
+            cmp     cursor_index
+            bne     draw_default_normal
+            lda     #UI_COLOR_SUCCESS_SELECTED
+            bra     draw_default_color
+draw_default_normal:
+            lda     #UI_COLOR_SUCCESS
+draw_default_color:
+            sta     ui_color
+            lda     #GLYPH_DEFAULT
+            jsr     ui_putc_colored
+            bra     draw_selected_marker_done
 +           lda     #' '
 draw_selected_marker:
             jsr     ui_putc
+draw_selected_marker_done:
             lda     ui_entry_flags
             and     #FLAG_RUNNING
             beq     +
-            lda     #'+'
-            bra     draw_running_marker
+            lda     catalog_draw_index
+            cmp     cursor_index
+            bne     draw_booted_normal
+            lda     #UI_COLOR_ORANGE_SELECTED
+            bra     draw_booted_color
+draw_booted_normal:
+            lda     #UI_COLOR_ORANGE
+draw_booted_color:
+            sta     ui_color
+            lda     #GLYPH_BOOTED
+            jsr     ui_putc_colored
+            bra     draw_running_marker_done
 +           lda     #' '
 draw_running_marker:
             jsr     ui_putc
+draw_running_marker_done:
             lda     #' '
             jsr     ui_putc
+            lda     catalog_draw_index
+            cmp     cursor_index
+            bne     +
+            lda     #UI_COLOR_HIGHLIGHT
+            bra     draw_source_color
++           lda     #UI_COLOR_LABEL
+draw_source_color:
+            sta     ui_color
             lda     ui_entry_source
-            jsr     ui_print_source
+            jsr     ui_print_source_colored
             lda     #' '
             jsr     ui_putc
             lda     ZP_POINTER
             sta     status_pointer
             lda     ZP_POINTER+1
             sta     status_pointer+1
-            lda     ui_entry_index
+            lda     catalog_draw_index
             sta     catalog_index
             jsr     catalog_entry_pointer
             clc
@@ -2879,10 +3108,10 @@ draw_status:
             stx     status_pointer+1
             lda     #2
             sta     MMU_IO_CTRL
-            ldy     #UI_BOTTOM_LINE+2
+            ldy     #UI_STATUS_MESSAGE_LINE
             jsr     ui_clear_full_row
-            ldx     #5
-            ldy     #UI_BOTTOM_LINE+2
+            ldx     #3
+            ldy     #UI_STATUS_MESSAGE_LINE
             jsr     ui_set_xy
             lda     status_pointer
             ldx     status_pointer+1
@@ -2893,36 +3122,32 @@ draw_status:
 draw_delete_confirmation:
             lda     #2
             sta     MMU_IO_CTRL
-            ldy     #UI_BOTTOM_LINE+2
-            jsr     ui_clear_full_row
-            ldy     #UI_PROGRESS_LABEL_LINE
-            jsr     ui_clear_full_row
-            ldy     #UI_PROGRESS_BAR_LINE
-            jsr     ui_clear_full_row
-            ldy     #UI_PROGRESS_DETAIL_LINE
-            jsr     ui_clear_full_row
-            ldx     #UI_BOX_LEFT
-            ldy     #UI_BOTTOM_LINE+2
+            jsr     ui_dim_screen
+            lda     #UI_COLOR_ERROR
+            sta     ui_modal_color
+            jsr     ui_draw_modal
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_MODAL_TOP+2
             jsr     ui_set_xy
             lda     #<delete_prompt_text
             ldx     #>delete_prompt_text
             jsr     ui_puts
-            ldx     #UI_BOX_LEFT
-            ldy     #UI_PROGRESS_LABEL_LINE
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_MODAL_TOP+5
             jsr     ui_set_xy
             ldy     #0
 draw_delete_path_loop:
             cpy     delete_path_length
             beq     draw_delete_instruction
-            cpy     #68
+            cpy     #49
             beq     draw_delete_instruction
             lda     delete_path,y
             jsr     ui_putc
             iny
             bra     draw_delete_path_loop
 draw_delete_instruction:
-            ldx     #UI_BOX_LEFT
-            ldy     #UI_PROGRESS_BAR_LINE
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_MODAL_BOTTOM-2
             jsr     ui_set_xy
             lda     #<delete_confirm_text
             ldx     #>delete_confirm_text
@@ -2968,50 +3193,95 @@ draw_progress:
 
             lda     #2
             sta     MMU_IO_CTRL
-            ldy     #UI_PROGRESS_LABEL_LINE
-            jsr     ui_clear_full_row
-            ldy     #UI_PROGRESS_BAR_LINE
-            jsr     ui_clear_full_row
-            ldy     #UI_PROGRESS_DETAIL_LINE
-            jsr     ui_clear_full_row
-
-            ldx     #UI_BOX_LEFT
-            ldy     #UI_PROGRESS_LABEL_LINE
+            lda     progress_modal_visible
+            bne     draw_progress_modal_ready
+            jsr     ui_dim_screen
+            lda     #UI_COLOR_FRAME
+            sta     ui_modal_color
+            jsr     ui_draw_modal
+            stz     progress_modal_kind
+            stz     progress_drawn_label
+            stz     progress_drawn_label+1
+            lda     #1
+            sta     progress_modal_visible
+draw_progress_modal_ready:
+            jsr     progress_select_kind
+            cmp     progress_modal_kind
+            beq     draw_progress_static_ready
+            sta     progress_modal_kind
+            stz     progress_drawn_label
+            stz     progress_drawn_label+1
+            jsr     draw_progress_static
+draw_progress_static_ready:
+            lda     progress_label
+            cmp     progress_drawn_label
+            bne     draw_progress_status
+            lda     progress_label+1
+            cmp     progress_drawn_label+1
+            beq     draw_progress_status_ready
+draw_progress_status:
+            ldy     #UI_PROGRESS_STATUS_LINE
+            jsr     ui_clear_modal_row
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_PROGRESS_STATUS_LINE
             jsr     ui_set_xy
+            jsr     progress_select_status_color
+            sta     ui_color
             lda     progress_label
             ldx     progress_label+1
-            jsr     ui_puts
-
-            ldx     #UI_BOX_LEFT
+            jsr     ui_puts_colored
+            lda     progress_label
+            sta     progress_drawn_label
+            lda     progress_label+1
+            sta     progress_drawn_label+1
+draw_progress_status_ready:
+            ; Every cell in the bar and fixed-width detail fields is replaced
+            ; below. Do not flash the row by blanking it first.
+            ldx     #UI_MODAL_LEFT+3
             ldy     #UI_PROGRESS_BAR_LINE
             jsr     ui_set_xy
-            lda     #'['
-            jsr     ui_putc
             ldx     #0
 draw_progress_bar_loop:
             jsr     progress_total_is_zero
             bcc     draw_determinate_cell
             cpx     progress_activity
             bne     draw_activity_empty
-            lda     #'>'
+            lda     #UI_COLOR_PROGRESS_ACTIVE
+            sta     ui_color
+            lda     #GLYPH_CURSOR
             bra     draw_progress_cell
 draw_activity_empty:
-            lda     #'.'
+            lda     #UI_COLOR_PROGRESS_EMPTY
+            sta     ui_color
+            lda     #' '
             bra     draw_progress_cell
 draw_determinate_cell:
             cpx     progress_filled
             bcc     draw_progress_filled_cell
-            lda     #'.'
+            bne     draw_progress_empty_cell
+            lda     progress_partial
+            beq     draw_progress_empty_cell
+            clc
+            adc     #GLYPH_PROGRESS_FIRST-1
+            pha
+            lda     #UI_COLOR_SUCCESS_SELECTED
+            sta     ui_color
+            pla
+            bra     draw_progress_cell
+draw_progress_empty_cell:
+            lda     #UI_COLOR_PROGRESS_EMPTY
+            sta     ui_color
+            lda     #' '
             bra     draw_progress_cell
 draw_progress_filled_cell:
-            lda     #'='
+            lda     #UI_COLOR_SUCCESS_SELECTED
+            sta     ui_color
+            lda     #GLYPH_PROGRESS_FULL
 draw_progress_cell:
-            jsr     ui_putc
+            jsr     ui_putc_colored
             inx
             cpx     #UI_PROGRESS_BAR_WIDTH
             bne     draw_progress_bar_loop
-            lda     #']'
-            jsr     ui_putc
             jsr     progress_total_is_zero
             bcc     draw_progress_detail
 draw_progress_activity_done:
@@ -3022,38 +3292,173 @@ draw_progress_activity_done:
             stz     progress_activity
 
 draw_progress_detail:
-            ldx     #UI_BOX_LEFT
-            ldy     #UI_PROGRESS_DETAIL_LINE
-            jsr     ui_set_xy
+            lda     #' '
+            jsr     ui_putc
+            lda     #' '
+            jsr     ui_putc
+            lda     #UI_COLOR_ACCENT
+            sta     ui_color
             jsr     progress_total_is_zero
             bcs     draw_progress_current_detail
             stz     decimal_value+1
             lda     progress_percent
             sta     decimal_value
+            lda     #3
+            sta     decimal_width
             jsr     ui_print_u16_decimal
             lda     #<progress_percent_text
             ldx     #>progress_percent_text
-            jsr     ui_puts
+            jsr     ui_puts_colored
 draw_progress_current_detail:
             jsr     progress_current_to_kib
+            lda     #4
+            sta     decimal_width
             jsr     ui_print_u16_decimal
             jsr     progress_total_is_zero
             bcc     draw_progress_total_detail
             lda     #<progress_scanned_text
             ldx     #>progress_scanned_text
-            jsr     ui_puts
+            jsr     ui_puts_colored
             bra     draw_progress_done
 draw_progress_total_detail:
             lda     #<progress_separator_text
             ldx     #>progress_separator_text
-            jsr     ui_puts
+            jsr     ui_puts_colored
             jsr     progress_total_to_kib
+            lda     #4
+            sta     decimal_width
             jsr     ui_print_u16_decimal
             lda     #<progress_kib_text
             ldx     #>progress_kib_text
-            jsr     ui_puts
+            jsr     ui_puts_colored
 draw_progress_done:
             stz     MMU_IO_CTRL
+            rts
+
+; Map stage labels to the four modal designs. Scan and upload are separate
+; phases of a local transfer, so their static headings change exactly once.
+progress_select_kind:
+            lda     progress_label+1
+            cmp     #>scan_progress_text
+            bne     progress_select_manager
+            lda     progress_label
+            cmp     #<scan_progress_text
+            beq     progress_return_scan_kind
+progress_select_manager:
+            lda     progress_label+1
+            cmp     #>install_progress_text
+            bne     progress_select_export
+            lda     progress_label
+            cmp     #<install_progress_text
+            beq     progress_return_manager_kind
+progress_select_export:
+            lda     progress_label+1
+            cmp     #>export_progress_text
+            bne     progress_return_flash_kind
+            lda     progress_label
+            cmp     #<export_progress_text
+            beq     progress_return_export_kind
+progress_return_flash_kind:
+            lda     #PROGRESS_KIND_FLASH
+            rts
+progress_return_scan_kind:
+            lda     #PROGRESS_KIND_SCAN
+            rts
+progress_return_manager_kind:
+            lda     #PROGRESS_KIND_MANAGER
+            rts
+progress_return_export_kind:
+            lda     #PROGRESS_KIND_EXPORT
+            rts
+
+draw_progress_static:
+            ldy     #UI_PROGRESS_TITLE_LINE
+            jsr     ui_clear_modal_row
+            ldy     #UI_PROGRESS_NAME_LINE
+            jsr     ui_clear_modal_row
+            ldy     #UI_PROGRESS_HINT_LINE
+            jsr     ui_clear_modal_row
+
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_PROGRESS_TITLE_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_ACCENT
+            sta     ui_color
+            lda     progress_modal_kind
+            cmp     #PROGRESS_KIND_SCAN
+            beq     draw_progress_scan_title
+            cmp     #PROGRESS_KIND_MANAGER
+            beq     draw_progress_manager_title
+            cmp     #PROGRESS_KIND_EXPORT
+            beq     draw_progress_export_title
+            lda     #<progress_flash_title
+            ldx     #>progress_flash_title
+            bra     draw_progress_title
+draw_progress_scan_title:
+            lda     #<progress_scan_title
+            ldx     #>progress_scan_title
+            bra     draw_progress_title
+draw_progress_manager_title:
+            lda     #<progress_manager_title
+            ldx     #>progress_manager_title
+            bra     draw_progress_title
+draw_progress_export_title:
+            lda     #<progress_export_title
+            ldx     #>progress_export_title
+draw_progress_title:
+            jsr     ui_puts_colored
+
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_PROGRESS_NAME_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_NORMAL
+            sta     ui_color
+            ldy     #0
+draw_progress_name_loop:
+            cpy     #UI_MODAL_RIGHT-UI_MODAL_LEFT-6
+            beq     draw_progress_hint
+            lda     install_name,y
+            beq     draw_progress_hint
+            jsr     ui_putc_colored
+            iny
+            bra     draw_progress_name_loop
+
+draw_progress_hint:
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_PROGRESS_HINT_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_LABEL
+            sta     ui_color
+            lda     progress_modal_kind
+            cmp     #PROGRESS_KIND_SCAN
+            bne     draw_progress_locked_hint
+            lda     #<progress_cancel_hint
+            ldx     #>progress_cancel_hint
+            bra     draw_progress_hint_text
+draw_progress_locked_hint:
+            lda     #<progress_locked_hint
+            ldx     #>progress_locked_hint
+draw_progress_hint_text:
+            jmp     ui_puts_colored
+
+progress_select_status_color:
+            lda     progress_modal_kind
+            cmp     #PROGRESS_KIND_SCAN
+            beq     progress_status_label
+            lda     progress_label+1
+            cmp     #>flash_done_progress_text
+            bne     progress_status_error
+            lda     progress_label
+            cmp     #<flash_done_progress_text
+            beq     progress_status_success
+progress_status_error:
+            lda     #UI_COLOR_ERROR
+            rts
+progress_status_success:
+            lda     #UI_COLOR_SUCCESS
+            rts
+progress_status_label:
+            lda     #UI_COLOR_LABEL
             rts
 
 progress_total_is_zero:
@@ -3073,6 +3478,7 @@ progress_total_is_zero:
 calculate_progress_values:
             stz     progress_percent
             stz     progress_filled
+            stz     progress_partial
             jsr     progress_total_is_zero
             bcc     +
             rts
@@ -3086,6 +3492,7 @@ calculate_progress_values:
             jsr     calculate_progress_ratio
             lda     progress_ratio_result
             sta     progress_filled
+            jsr     calculate_progress_partial
             rts
 
 ; Return min(limit, floor(current * limit / total)). current and total are
@@ -3142,6 +3549,47 @@ progress_ratio_subtract:
             inc     progress_ratio_result
             bra     progress_ratio_divide_loop
 progress_ratio_done:
+            rts
+
+; calculate_progress_ratio leaves (current * width) mod total in
+; progress_work. Scale that remainder to one of seven partial-cell glyphs.
+; Eight eighths are never returned: that would already be a full cell.
+calculate_progress_partial:
+            lda     progress_filled
+            cmp     #UI_PROGRESS_BAR_WIDTH
+            bcs     calculate_progress_partial_done
+            .for shift := 0, shift < 3, shift += 1
+            asl     progress_work
+            rol     progress_work+1
+            rol     progress_work+2
+            rol     progress_work+3
+            .next
+calculate_progress_partial_loop:
+            ldx     #3
+calculate_progress_partial_compare:
+            lda     progress_work,x
+            cmp     progress_total,x
+            bcc     calculate_progress_partial_done
+            bne     calculate_progress_partial_subtract
+            dex
+            bpl     calculate_progress_partial_compare
+calculate_progress_partial_subtract:
+            sec
+            lda     progress_work
+            sbc     progress_total
+            sta     progress_work
+            lda     progress_work+1
+            sbc     progress_total+1
+            sta     progress_work+1
+            lda     progress_work+2
+            sbc     progress_total+2
+            sta     progress_work+2
+            lda     progress_work+3
+            sbc     progress_total+3
+            sta     progress_work+3
+            inc     progress_partial
+            bra     calculate_progress_partial_loop
+calculate_progress_partial_done:
             rts
 
 progress_current_to_kib:
@@ -3206,8 +3654,100 @@ progress_total_to_kib:
             sta     decimal_value+1
             rts
 
+ui_clear_modal_row:
+            sty     ui_row
+            ldx     #UI_MODAL_LEFT+1
+            jsr     ui_set_xy
+            lda     #UI_COLOR_NORMAL
+            sta     ui_color
+            ldx     #UI_MODAL_RIGHT-UI_MODAL_LEFT-1
+ui_clear_modal_row_loop:
+            lda     #' '
+            jsr     ui_putc_colored
+            dex
+            bne     ui_clear_modal_row_loop
+            rts
+
+ui_dim_screen:
+            php
+            sei
+            lda     #3
+            sta     MMU_IO_CTRL
+            ldx     #0
+            lda     #UI_COLOR_DIM
+ui_dim_screen_loop:
+            .for page := 0, page < 19, page += 1
+            sta     TEXT_BUFFER+page*$100,x
+            .next
+            inx
+            bne     ui_dim_screen_loop
+            lda     #2
+            sta     MMU_IO_CTRL
+            plp
+            rts
+
+ui_draw_modal:
+            lda     ui_modal_color
+            sta     ui_color
+            ldx     #UI_MODAL_LEFT
+            ldy     #UI_MODAL_TOP
+            jsr     ui_set_xy
+            lda     #BOX_TL
+            jsr     ui_putc_colored
+            ldx     #UI_MODAL_RIGHT-UI_MODAL_LEFT-1
+ui_modal_top_fill:
+            lda     #BOX_H
+            jsr     ui_putc_colored
+            dex
+            bne     ui_modal_top_fill
+            lda     #BOX_TR
+            jsr     ui_putc_colored
+            lda     #UI_MODAL_TOP+1
+            sta     ui_modal_row
+ui_modal_body_row:
+            ldx     #UI_MODAL_LEFT
+            ldy     ui_modal_row
+            jsr     ui_set_xy
+            lda     ui_modal_color
+            sta     ui_color
+            lda     #BOX_V
+            jsr     ui_putc_colored
+            lda     #UI_COLOR_NORMAL
+            sta     ui_color
+            ldx     #UI_MODAL_RIGHT-UI_MODAL_LEFT-1
+ui_modal_clear_fill:
+            lda     #' '
+            jsr     ui_putc_colored
+            dex
+            bne     ui_modal_clear_fill
+            lda     ui_modal_color
+            sta     ui_color
+            lda     #BOX_V
+            jsr     ui_putc_colored
+            inc     ui_modal_row
+            lda     ui_modal_row
+            cmp     #UI_MODAL_BOTTOM
+            bcc     ui_modal_body_row
+            ldx     #UI_MODAL_LEFT
+            ldy     #UI_MODAL_BOTTOM
+            jsr     ui_set_xy
+            lda     #BOX_BL
+            jsr     ui_putc_colored
+            ldx     #UI_MODAL_RIGHT-UI_MODAL_LEFT-1
+ui_modal_bottom_fill:
+            lda     #BOX_H
+            jsr     ui_putc_colored
+            dex
+            bne     ui_modal_bottom_fill
+            lda     #BOX_BR
+            jmp     ui_putc_colored
+
 ui_print_u16_decimal:
             stz     decimal_started
+            lda     #5
+            sec
+            sbc     decimal_width
+            sta     decimal_padding_start
             ldx     #0
 decimal_power_loop:
             stz     decimal_digit
@@ -3235,12 +3775,17 @@ decimal_emit_digit:
             lda     decimal_started
             bne     decimal_print_zero
             cpx     #4
-            bne     decimal_next_power
+            beq     decimal_print_zero
+            cpx     decimal_padding_start
+            bcc     decimal_next_power
+            lda     #' '
+            jsr     ui_putc_colored
+            bra     decimal_next_power
 decimal_print_zero:
             lda     #0
 decimal_print_digit:
             ora     #'0'
-            jsr     ui_putc
+            jsr     ui_putc_colored
             lda     #1
             sta     decimal_started
 decimal_next_power:
@@ -3250,6 +3795,10 @@ decimal_next_power:
             rts
 
 ui_clear_screen:
+            stz     progress_modal_visible
+            stz     progress_modal_kind
+            stz     progress_drawn_label
+            stz     progress_drawn_label+1
             stz     MMU_IO_CTRL
             ldx     #63
 ui_init_palette:
@@ -3267,7 +3816,7 @@ ui_init_background:
             bpl     ui_init_background
             lda     #$01                ; text-only display
             sta     $d000
-            stz     $d001               ; 80 columns by 60 rows
+            stz     $d001               ; 80 columns by 60 normal-height rows
             stz     $d010               ; hide the hardware text cursor
             lda     #3
             sta     MMU_IO_CTRL
@@ -3292,61 +3841,233 @@ ui_clear_text:
             stz     MMU_IO_CTRL
             rts
 
-; Draw the generated 80x5 F256-character-set wordmark.  The character and
-; color-ID planes are kept verbatim in fpga_manager_logo_80x5.inc.  Palette
-; indices 0, 3, 6, and 8 are black, logo green, logo cream, and dark trace.
-ui_draw_logo:
-            lda     #2
-            sta     MMU_IO_CTRL
-            ldx     #0
-ui_draw_logo_chars_page_0:
-            lda     ui_logo_chars,x
-            sta     TEXT_BUFFER,x
-            inx
-            bne     ui_draw_logo_chars_page_0
-            ldx     #0
-ui_draw_logo_chars_page_1:
-            lda     ui_logo_chars+$100,x
-            sta     TEXT_BUFFER+$100,x
-            inx
-            cpx     #144                ; 400 cells total
-            bne     ui_draw_logo_chars_page_1
+; Compact one-line product identity from the design template.
+ui_draw_header:
+            ldx     #3
+            ldy     #UI_HEADER_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_ACCENT
+            sta     ui_color
+            lda     #<ui_brand_text
+            ldx     #>ui_brand_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_ORANGE
+            sta     ui_color
+            lda     #<ui_brand_k2_text
+            ldx     #>ui_brand_k2_text
+            jsr     ui_puts_colored
+            ldx     #20
+            ldy     #UI_HEADER_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_LABEL
+            sta     ui_color
+            lda     #<ui_manager_text
+            ldx     #>ui_manager_text
+            jmp     ui_puts_colored
 
-            lda     #3
-            sta     MMU_IO_CTRL
-            ldx     #0
-ui_draw_logo_colors_page_0:
-            ldy     ui_logo_colors,x
-            lda     ui_logo_color_attrs,y
-            sta     TEXT_BUFFER,x
-            inx
-            bne     ui_draw_logo_colors_page_0
-            ldx     #0
-ui_draw_logo_colors_page_1:
-            ldy     ui_logo_colors+$100,x
-            lda     ui_logo_color_attrs,y
-            sta     TEXT_BUFFER+$100,x
-            inx
-            cpx     #144
-            bne     ui_draw_logo_colors_page_1
-            lda     #2
-            sta     MMU_IO_CTRL
-            rts
+; Help is deliberately laid out as its own panel rather than borrowing the
+; catalog's tabs, column heading, and separator. This follows the design
+; template and leaves enough breathing room around the grouped controls.
+ui_draw_help_frame:
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            ldx     #UI_HELP_LEFT
+            ldy     #UI_HELP_TOP
+            jsr     ui_set_xy
+            lda     #BOX_TL
+            jsr     ui_putc_colored
+            ldx     #UI_HELP_RIGHT-UI_HELP_LEFT-1
+ui_help_top_fill:
+            lda     #BOX_H
+            jsr     ui_putc_colored
+            dex
+            bne     ui_help_top_fill
+            lda     #BOX_TR
+            jsr     ui_putc_colored
+            lda     #UI_HELP_TOP+1
+            sta     ui_modal_row
+ui_help_body_row:
+            ldx     #UI_HELP_LEFT
+            ldy     ui_modal_row
+            jsr     ui_set_xy
+            lda     #BOX_V
+            jsr     ui_putc_colored
+            ldx     #UI_HELP_RIGHT
+            ldy     ui_modal_row
+            jsr     ui_set_xy
+            lda     #BOX_V
+            jsr     ui_putc_colored
+            inc     ui_modal_row
+            lda     ui_modal_row
+            cmp     #UI_HELP_BOTTOM
+            bcc     ui_help_body_row
+            ldx     #UI_HELP_LEFT
+            ldy     #UI_HELP_BOTTOM
+            jsr     ui_set_xy
+            lda     #BOX_BL
+            jsr     ui_putc_colored
+            ldx     #UI_HELP_RIGHT-UI_HELP_LEFT-1
+ui_help_bottom_fill:
+            lda     #BOX_H
+            jsr     ui_putc_colored
+            dex
+            bne     ui_help_bottom_fill
+            lda     #BOX_BR
+            jmp     ui_putc_colored
+
+ui_draw_help_legend:
+            ldx     #7
+            ldy     #UI_HELP_BOTTOM
+            jsr     ui_set_xy
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_RIGHT
+            jsr     ui_putc_colored
+            lda     #UI_COLOR_ACCENT
+            sta     ui_color
+            lda     #<ui_cursor_legend_text
+            ldx     #>ui_cursor_legend_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_SUCCESS
+            sta     ui_color
+            lda     #<ui_default_legend_text
+            ldx     #>ui_default_legend_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_ORANGE
+            sta     ui_color
+            lda     #<ui_booted_legend_text
+            ldx     #>ui_booted_legend_text
+            jsr     ui_puts_colored
+            ldx     #40
+            ldy     #UI_HELP_BOTTOM
+            jsr     ui_set_xy
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_LEFT
+            jmp     ui_putc_colored
 
 ui_draw_top_border:
+            jsr     ui_draw_plain_top_border
+            ldx     #7
+            ldy     #UI_FRAME_TOP_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_RIGHT
+            jsr     ui_putc_colored
+            ldx     #8
+            ldy     #UI_FRAME_TOP_LINE
+            jsr     ui_set_xy
+            lda     view_mode
+            bne     ui_draw_catalog_tab_inactive
+            lda     #UI_COLOR_ACCENT
+            bra     ui_draw_catalog_tab
+
+ui_draw_plain_top_border:
             lda     #BOX_TL
             sta     ui_border_left
             lda     #BOX_TR
             sta     ui_border_right
-            ldy     #UI_LIST_LINE-1
-            bra     ui_draw_border
+            ldy     #UI_FRAME_TOP_LINE
+            jmp     ui_draw_border
+ui_draw_catalog_tab_inactive:
+            lda     #UI_COLOR_LABEL
+ui_draw_catalog_tab:
+            sta     ui_color
+            lda     #<ui_catalog_tab_text
+            ldx     #>ui_catalog_tab_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_LEFT
+            jsr     ui_putc_colored
+            ldx     #30
+            ldy     #UI_FRAME_TOP_LINE
+            jsr     ui_set_xy
+            lda     #BOX_TEE_RIGHT
+            jsr     ui_putc_colored
+            ldx     #31
+            ldy     #UI_FRAME_TOP_LINE
+            jsr     ui_set_xy
+            lda     view_mode
+            beq     ui_draw_local_tab_inactive
+            lda     #UI_COLOR_ACCENT
+            bra     ui_draw_local_tab
+ui_draw_local_tab_inactive:
+            lda     #UI_COLOR_LABEL
+ui_draw_local_tab:
+            sta     ui_color
+            lda     #<ui_local_tab_text
+            ldx     #>ui_local_tab_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_LEFT
+            jmp     ui_putc_colored
+
+ui_draw_separator:
+            lda     #UI_COLOR_LABEL
+            ldy     #UI_COLUMNS_LINE
+            jsr     ui_set_line_color
+            ldx     #UI_BOX_LEFT
+            ldy     #UI_COLUMNS_LINE
+            jsr     ui_set_xy
+            lda     #BOX_V
+            jsr     ui_putc
+            ldx     #UI_BOX_RIGHT
+            ldy     #UI_COLUMNS_LINE
+            jsr     ui_set_xy
+            lda     #BOX_V
+            jsr     ui_putc
+            lda     #BOX_TEE_LEFT
+            sta     ui_border_left
+            lda     #BOX_TEE_RIGHT
+            sta     ui_border_right
+            ldy     #UI_SEPARATOR_LINE
+            jmp     ui_draw_border
 
 ui_draw_bottom_border:
+            jsr     ui_draw_plain_bottom_border
+            ldx     #7
+            ldy     #UI_BOTTOM_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_RIGHT
+            jsr     ui_putc_colored
+            ldx     #8
+            ldy     #UI_BOTTOM_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_ACCENT
+            sta     ui_color
+            lda     #<ui_cursor_legend_text
+            ldx     #>ui_cursor_legend_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_SUCCESS
+            sta     ui_color
+            lda     #<ui_default_legend_text
+            ldx     #>ui_default_legend_text
+            jsr     ui_puts_colored
+            lda     #UI_COLOR_ORANGE
+            sta     ui_color
+            lda     #<ui_booted_legend_text
+            ldx     #>ui_booted_legend_text
+            jsr     ui_puts_colored
+            ldx     #40
+            ldy     #UI_BOTTOM_LINE
+            jsr     ui_set_xy
+            lda     #UI_COLOR_FRAME
+            sta     ui_color
+            lda     #BOX_TEE_LEFT
+            jmp     ui_putc_colored
+
+ui_draw_plain_bottom_border:
             lda     #BOX_BL
             sta     ui_border_left
             lda     #BOX_BR
             sta     ui_border_right
             ldy     #UI_BOTTOM_LINE
+            jmp     ui_draw_border
 
 ui_draw_border:
             sty     ui_row
@@ -3367,21 +4088,100 @@ ui_border_fill:
             jmp     ui_putc
 
 ui_draw_key_bar:
-            lda     #UI_COLOR_KEY_BAR
-            ldy     #UI_KEY_LINE
-            jsr     ui_set_full_line_color
-            ldx     #0
-            ldy     #UI_KEY_LINE
-            jsr     ui_set_xy
             lda     view_mode
-            bne     ui_local_key_bar
+            bne     ui_draw_local_keys
             lda     #<key_bar_text
             ldx     #>key_bar_text
-            jmp     ui_puts
-ui_local_key_bar:
+            jsr     ui_draw_key_line_1
+            lda     #<catalog_key_bar_text_2
+            ldx     #>catalog_key_bar_text_2
+            jmp     ui_draw_key_line_2
+ui_draw_local_keys:
             lda     #<local_key_bar_text
             ldx     #>local_key_bar_text
-            jmp     ui_puts
+            jsr     ui_draw_key_line_1
+            lda     #<key_bar_text_2
+            ldx     #>key_bar_text_2
+            jmp     ui_draw_key_line_2
+
+ui_draw_key_line_1:
+            sta     status_pointer
+            stx     status_pointer+1
+            lda     #UI_COLOR_NORMAL
+            ldy     #UI_KEY_LINE
+            jsr     ui_set_full_line_color
+            ldx     #3
+            ldy     #UI_KEY_LINE
+            bra     ui_draw_key_line
+ui_draw_key_line_2:
+            sta     status_pointer
+            stx     status_pointer+1
+            lda     #UI_COLOR_NORMAL
+            ldy     #UI_KEY_LINE_2
+            jsr     ui_set_full_line_color
+            ldx     #3
+            ldy     #UI_KEY_LINE_2
+ui_draw_key_line:
+            jsr     ui_set_xy
+            lda     status_pointer
+            ldx     status_pointer+1
+            bra     ui_draw_segmented_key_bar
+
+ui_draw_return_hint:
+            lda     #UI_COLOR_NORMAL
+            ldy     #UI_KEY_LINE_2
+            jsr     ui_set_full_line_color
+            ldx     #3
+            ldy     #UI_KEY_LINE_2
+            jsr     ui_set_xy
+            lda     #<boot_log_key_bar_text
+            ldx     #>boot_log_key_bar_text
+            jmp     ui_draw_segmented_key_bar
+
+; Draw a zero-terminated key line from A/X. KEY_BAR_TOGGLE changes from the
+; amber key name to its cyan description (and back) without using a cell.
+ui_draw_segmented_key_bar:
+            sta     ZP_TIMEOUT0
+            stx     ZP_TIMEOUT1
+            lda     #UI_COLOR_KEY_BAR
+            sta     ui_color
+            php
+            sei
+            ldy     #0
+ui_key_bar_loop:
+            lda     (ZP_TIMEOUT0),y
+            beq     ui_key_bar_done
+            cmp     #KEY_BAR_TOGGLE
+            beq     ui_key_bar_toggle
+            sta     (ZP_POINTER)
+            lda     #3
+            sta     MMU_IO_CTRL
+            lda     ui_color
+            sta     (ZP_POINTER)
+            lda     #2
+            sta     MMU_IO_CTRL
+            inc     ZP_POINTER
+            bne     +
+            inc     ZP_POINTER+1
++           inc     ui_column
+ui_key_bar_next:
+            iny
+            bne     ui_key_bar_loop
+            inc     ZP_TIMEOUT1
+            bra     ui_key_bar_loop
+ui_key_bar_toggle:
+            lda     ui_color
+            cmp     #UI_COLOR_KEY_BAR
+            beq     +
+            lda     #UI_COLOR_KEY_BAR
+            bra     ui_key_bar_set_color
++           lda     #UI_COLOR_FRAME
+ui_key_bar_set_color:
+            sta     ui_color
+            bra     ui_key_bar_next
+ui_key_bar_done:
+            plp
+            rts
 
 ui_print_source:
             cmp     #SOURCE_AUTO
@@ -3403,6 +4203,27 @@ ui_print_source:
             ldx     #>source_golden_text
 ui_source_done:
             jmp     ui_puts
+
+ui_print_source_colored:
+            cmp     #SOURCE_AUTO
+            bne     +
+            lda     #<source_auto_text
+            ldx     #>source_auto_text
+            bra     ui_source_colored_done
++           cmp     #SOURCE_SD
+            bne     +
+            lda     #<source_sd_text
+            ldx     #>source_sd_text
+            bra     ui_source_colored_done
++           cmp     #SOURCE_FLASH
+            bne     +
+            lda     #<source_flash_text
+            ldx     #>source_flash_text
+            bra     ui_source_colored_done
++           lda     #<source_golden_text
+            ldx     #>source_golden_text
+ui_source_colored_done:
+            jmp     ui_puts_colored
 
 ui_print_hex_byte:
             pha
@@ -3439,6 +4260,20 @@ ui_putc:
 +           inc     ui_column
             rts
 
+ui_putc_colored:
+            sta     (ZP_POINTER)
+            lda     #3
+            sta     MMU_IO_CTRL
+            lda     ui_color
+            sta     (ZP_POINTER)
+            lda     #2
+            sta     MMU_IO_CTRL
+            inc     ZP_POINTER
+            bne     +
+            inc     ZP_POINTER+1
++           inc     ui_column
+            rts
+
 ui_puts:
             sta     ZP_TIMEOUT0
             stx     ZP_TIMEOUT1
@@ -3452,6 +4287,36 @@ ui_puts_loop:
             inc     ZP_TIMEOUT1
             bra     ui_puts_loop
 ui_puts_done:
+            rts
+
+; Write text and its per-cell attribute together. ui_color contains the
+; foreground/background attribute and A/X points to a zero-terminated string.
+ui_puts_colored:
+            sta     ZP_TIMEOUT0
+            stx     ZP_TIMEOUT1
+            php
+            sei
+            ldy     #0
+ui_puts_colored_loop:
+            lda     (ZP_TIMEOUT0),y
+            beq     ui_puts_colored_done
+            sta     (ZP_POINTER)
+            lda     #3
+            sta     MMU_IO_CTRL
+            lda     ui_color
+            sta     (ZP_POINTER)
+            lda     #2
+            sta     MMU_IO_CTRL
+            inc     ZP_POINTER
+            bne     +
+            inc     ZP_POINTER+1
++           inc     ui_column
+            iny
+            bne     ui_puts_colored_loop
+            inc     ZP_TIMEOUT1
+            bra     ui_puts_colored_loop
+ui_puts_colored_done:
+            plp
             rts
 
 ui_set_line_color:
@@ -3552,6 +4417,64 @@ catalog_begin_done:
             rts
 
 catalog_get:
+            jsr     catalog_get_once
+            bcc     catalog_get_return
+            lda     mailbox_error
+            cmp     #$21                ; RP2040 catalog was rebuilt
+            bne     catalog_get_error
+            lda     catalog_refreshing
+            bne     catalog_get_error
+            lda     catalog_index
+            cmp     catalog_count
+            bcs     catalog_get_entry_lost
+            jsr     catalog_entry_pointer
+            ldy     #ENTRY_SOURCE
+            lda     (ZP_POINTER),y
+            sta     highlight_source
+            ldy     #ENTRY_NAME_LENGTH
+            lda     (ZP_POINTER),y
+            sta     install_name_length
+            ldx     #0
+catalog_get_preserve_name:
+            cpx     install_name_length
+            beq     catalog_get_name_done
+            txa
+            clc
+            adc     #ENTRY_NAME
+            tay
+            lda     (ZP_POINTER),y
+            sta     install_name,x
+            inx
+            bra     catalog_get_preserve_name
+catalog_get_name_done:
+            stz     install_name,x
+            lda     #1
+            sta     catalog_refreshing
+            sta     highlight_pending
+            stz     highlight_found
+            jsr     load_catalog
+            stz     catalog_refreshing
+            bcs     catalog_get_refresh_failed
+            lda     highlight_found
+            beq     catalog_get_entry_lost
+            lda     cursor_index
+            sta     catalog_index
+            jsr     catalog_get_once
+catalog_get_return:
+            rts
+catalog_get_entry_lost:
+            lda     #$22                ; selected entry is no longer present
+            sta     mailbox_error
+            bra     catalog_get_error
+catalog_get_refresh_failed:
+            stz     highlight_pending
+            lda     #$ff
+            sta     highlight_source
+catalog_get_error:
+            sec
+            rts
+
+catalog_get_once:
             jsr     prepare_nonce
             ldx     #0
 copy_get_generation:
@@ -3566,12 +4489,12 @@ copy_get_generation:
             lda     #COMMAND_CATALOG_GET
             ldx     #10
             jsr     mailbox_command_response
-            bcs     catalog_get_done
+            bcs     catalog_get_once_done
             lda     response_length
             cmp     #19
             bcc     response_short
             clc
-catalog_get_done:
+catalog_get_once_done:
             rts
 
 get_boot_status:
@@ -3704,6 +4627,7 @@ copy_catalog_entry_to_flash:
             lda     response_buffer+11
             cmp     #FORMAT_GZIP
             bne     copy_flash_invalid
+            jsr     prepare_catalog_progress_name
             lda     #<flash_copy_text
             ldx     #>flash_copy_text
             jsr     draw_status
@@ -3766,9 +4690,51 @@ copy_flash_invalid:
             sec
             rts
 
-; Copy an exact visible manager-SD catalog image into the K2 SD browser's
-; current directory. The local write is staged under a hidden .part name and
-; is published only after the supervisor and K2 CRC/size values agree.
+; Preserve the selected catalog basename before COPY_BEGIN replaces the
+; catalog response buffer. The modal deliberately shows a filename, not the
+; manager-SD directory used to locate it.
+prepare_catalog_progress_name:
+            lda     response_buffer+18
+            beq     prepare_catalog_progress_name_empty
+            tay
+            dey
+prepare_catalog_progress_name_find:
+            lda     response_buffer+19,y
+            cmp     #'/'
+            beq     prepare_catalog_progress_name_found
+            dey
+            cpy     #$ff
+            bne     prepare_catalog_progress_name_find
+            ldy     #0
+            bra     prepare_catalog_progress_name_copy
+prepare_catalog_progress_name_found:
+            iny
+prepare_catalog_progress_name_copy:
+            ldx     #0
+prepare_catalog_progress_name_loop:
+            cpy     response_buffer+18
+            beq     prepare_catalog_progress_name_done
+            cpx     #LOCAL_ENTRY_NAME_MAX
+            beq     prepare_catalog_progress_name_done
+            lda     response_buffer+19,y
+            sta     install_name,x
+            inx
+            iny
+            bra     prepare_catalog_progress_name_loop
+prepare_catalog_progress_name_done:
+            stz     install_name,x
+            stx     install_name_length
+            rts
+prepare_catalog_progress_name_empty:
+            stz     install_name
+            stz     install_name_length
+            rts
+
+; Copy a manager-SD, replaceable-flash, or embedded-golden catalog image into
+; the K2 SD browser's current directory. Write and verify a hidden temporary
+; file first. Publication changes MicroKernel's CWD to the selected directory
+; because its rename implementation requires a bare destination name. An
+; existing final file is retained as a rollback backup until publication works.
 export_catalog_entry_to_local:
             jsr     prepare_export_entry
             bcs     export_return_error
@@ -3781,7 +4747,8 @@ export_catalog_entry_to_local:
             bpl     -
             stz     export_stream
             stz     export_stream_open
-            stz     export_verified
+            stz     export_temporary_created
+            stz     export_backup_created
             stz     transfer_progress
 
             ; Clear any abandoned transfer/read session before beginning.
@@ -3793,18 +4760,24 @@ export_catalog_entry_to_local:
             jsr     prepare_nonce
             lda     context
             sta     tx_buffer+4
-            lda     export_path_length
+            lda     #$ff                ; source-aware read request marker
             sta     tx_buffer+5
+            lda     export_source
+            sta     tx_buffer+6
+            lda     export_path_length
+            sta     tx_buffer+7
             tay
+            beq     export_begin_path_ready
             dey
 export_begin_copy_path:
             lda     EXPORT_PATH,y
-            sta     tx_buffer+6,y
+            sta     tx_buffer+8,y
             dey
             bpl     export_begin_copy_path
+export_begin_path_ready:
             lda     export_path_length
             clc
-            adc     #6
+            adc     #8
             tax
             lda     #COMMAND_READ_SD_BEGIN
             jsr     mailbox_command_response
@@ -3867,6 +4840,7 @@ export_opened:
             sta     export_stream
             lda     #1
             sta     export_stream_open
+            sta     export_temporary_created
 
 export_fetch_loop:
             ldx     #3
@@ -3990,7 +4964,7 @@ export_crc_done:
             bpl     -
             inc     transfer_progress
             lda     transfer_progress
-            and     #$1f
+            and     #PROGRESS_UPDATE_MASK
             bne     export_fetch_loop
             lda     #<export_progress_text
             ldx     #>export_progress_text
@@ -4021,8 +4995,6 @@ export_finalize_crc:
             bne     export_verify_failure
             dex
             bpl     export_finalize_crc
-            lda     #1
-            sta     export_verified
             ldx     #3
 -           lda     uploaded_size,x
             sta     progress_current,x
@@ -4034,16 +5006,18 @@ export_finalize_crc:
 
             jsr     export_close_local
             bcs     export_close_failure
-            ; Renaming first is both atomic and avoids treating a missing
-            ; destination as a delete failure. If the filesystem refuses to
-            ; replace an existing file, remove that file and retry once.
-            jsr     export_rename_temporary
-            bcc     export_publish_done
-            jsr     export_delete_destination
-            bcs     export_delete_failure
-            jsr     export_rename_temporary
-            bcs     export_rename_failure
+            jsr     export_verify_temporary
+            bcs     export_publish_failure
+            jsr     export_publish_temporary
+            bcs     export_publish_failure
 export_publish_done:
+            ; Reopen the exact full path before reporting success.
+            jsr     export_verify_destination
+            bcc     export_publish_verified
+            lda     #$ee
+            sta     mailbox_error
+            bra     export_cleanup
+export_publish_verified:
             clc
             rts
 
@@ -4062,11 +5036,7 @@ export_close_failure:
             lda     #$eb
             sta     mailbox_error
             bra     export_cleanup
-export_delete_failure:
-            lda     #$ec
-            sta     mailbox_error
-            bra     export_cleanup
-export_rename_failure:
+export_publish_failure:
             lda     #$ed
             sta     mailbox_error
             bra     export_cleanup
@@ -4083,8 +5053,8 @@ export_cleanup:
             beq     export_cleanup_delete
             jsr     export_close_local
 export_cleanup_delete:
-            lda     export_verified
-            bne     export_cleanup_restore
+            lda     export_temporary_created
+            beq     export_cleanup_restore
             jsr     export_delete_temporary
 export_cleanup_restore:
             lda     transfer_saved_error
@@ -4121,14 +5091,6 @@ export_close_failed:
             sec
             rts
 
-export_delete_destination:
-            lda     #<EXPORT_DESTINATION
-            sta     KARGS_BUF
-            lda     #>EXPORT_DESTINATION
-            sta     KARGS_BUF+1
-            lda     export_destination_length
-            sta     KARGS_BUFLEN
-            bra     export_delete_path
 export_delete_temporary:
             lda     #<EXPORT_TEMPORARY
             sta     KARGS_BUF
@@ -4136,6 +5098,15 @@ export_delete_temporary:
             sta     KARGS_BUF+1
             lda     export_temporary_length
             sta     KARGS_BUFLEN
+            bra     export_delete_path
+export_delete_backup:
+            lda     #<EXPORT_BACKUP
+            sta     KARGS_BUF
+            lda     #>EXPORT_BACKUP
+            sta     KARGS_BUF+1
+            lda     export_backup_length
+            sta     KARGS_BUFLEN
+            bra     export_delete_path
 export_delete_path:
             lda     local_drive
             sta     KARGS_FILE_DRIVE
@@ -4159,25 +5130,139 @@ export_delete_failed:
             sec
             rts
 
-export_rename_temporary:
-            lda     local_drive
-            sta     KARGS_FILE_DRIVE
-            stz     KARGS_FILE_COOKIE
+export_verify_temporary:
             lda     #<EXPORT_TEMPORARY
             sta     KARGS_BUF
             lda     #>EXPORT_TEMPORARY
             sta     KARGS_BUF+1
             lda     export_temporary_length
             sta     KARGS_BUFLEN
-            ; MicroKernel's FAT32 rename implementation resolves the new
-            ; name in the source file's directory and requires a bare name;
-            ; a full path is rejected as an illegal filename.
+            bra     export_verify_path
+export_verify_destination:
+            lda     #<EXPORT_DESTINATION
+            sta     KARGS_BUF
+            lda     #>EXPORT_DESTINATION
+            sta     KARGS_BUF+1
+            lda     export_destination_length
+            sta     KARGS_BUFLEN
+export_verify_path:
+            lda     local_drive
+            sta     KARGS_FILE_DRIVE
+            stz     KARGS_FILE_COOKIE
+            stz     KARGS_FILE_MODE       ; read-only existence check
+            jsr     KERNEL_FILE_OPEN
+            bcs     export_verify_destination_failed
+export_verify_destination_wait_open:
+            jsr     export_next_event
+            lda     EVENT_TYPE
+            cmp     #EVENT_FILE_OPENED
+            beq     export_verify_destination_opened
+            cmp     #EVENT_FILE_NOT_FOUND
+            beq     export_verify_destination_failed
+            cmp     #EVENT_FILE_ERROR
+            beq     export_verify_destination_failed
+            bra     export_verify_destination_wait_open
+export_verify_destination_opened:
+            lda     EVENT_STREAM
+            sta     export_stream
+            lda     #1
+            sta     export_stream_open
+            jsr     export_close_local
+            rts
+export_verify_destination_failed:
+            sec
+            rts
+
+; Publish the verified temporary file without destroying an existing final
+; file first. MicroKernel rename accepts a full source path, but resolves its
+; bare destination name in the current directory, so publication temporarily
+; changes CWD to the directory displayed by the local browser.
+export_publish_temporary:
+            jsr     export_chdir_local
+            bcs     export_publish_chdir_failed
+
+            ; A stale hidden backup must not prevent us from preserving the
+            ; current destination. Its absence is the common case, so ignore
+            ; deletion errors here and let the following rename remain safe.
+            jsr     export_delete_backup
+
+            jsr     export_rename_destination_to_backup
+            bcs     export_publish_no_existing
+            lda     #1
+            sta     export_backup_created
+export_publish_no_existing:
+            jsr     export_rename_temporary_to_destination
+            bcs     export_publish_rollback
+            stz     export_temporary_created
+
+            lda     export_backup_created
+            beq     export_publish_success
+            jsr     export_delete_backup
+            stz     export_backup_created
+export_publish_success:
+            jsr     export_chdir_root
+            clc
+            rts
+
+export_publish_rollback:
+            lda     export_backup_created
+            beq     export_publish_restore_cwd
+            jsr     export_rename_backup_to_destination
+            bcs     export_publish_restore_cwd
+            stz     export_backup_created
+export_publish_restore_cwd:
+            jsr     export_chdir_root
+            sec
+            rts
+export_publish_chdir_failed:
+            sec
+            rts
+
+export_rename_destination_to_backup:
+            lda     #<EXPORT_DESTINATION
+            sta     KARGS_BUF
+            lda     #>EXPORT_DESTINATION
+            sta     KARGS_BUF+1
+            lda     export_destination_length
+            sta     KARGS_BUFLEN
+            lda     #<EXPORT_BACKUP_NAME
+            sta     KARGS_EXT
+            lda     #>EXPORT_BACKUP_NAME
+            sta     KARGS_EXT+1
+            lda     export_backup_name_length
+            sta     KARGS_EXTLEN
+            bra     export_rename_path
+export_rename_temporary_to_destination:
+            lda     #<EXPORT_TEMPORARY
+            sta     KARGS_BUF
+            lda     #>EXPORT_TEMPORARY
+            sta     KARGS_BUF+1
+            lda     export_temporary_length
+            sta     KARGS_BUFLEN
             lda     #<EXPORT_BASENAME
             sta     KARGS_EXT
             lda     #>EXPORT_BASENAME
             sta     KARGS_EXT+1
             lda     export_basename_length
             sta     KARGS_EXTLEN
+            bra     export_rename_path
+export_rename_backup_to_destination:
+            lda     #<EXPORT_BACKUP
+            sta     KARGS_BUF
+            lda     #>EXPORT_BACKUP
+            sta     KARGS_BUF+1
+            lda     export_backup_length
+            sta     KARGS_BUFLEN
+            lda     #<EXPORT_BASENAME
+            sta     KARGS_EXT
+            lda     #>EXPORT_BASENAME
+            sta     KARGS_EXT+1
+            lda     export_basename_length
+            sta     KARGS_EXTLEN
+export_rename_path:
+            lda     local_drive
+            sta     KARGS_FILE_DRIVE
+            stz     KARGS_FILE_COOKIE
             jsr     KERNEL_FILE_RENAME
             bcs     export_rename_failed
 export_wait_rename:
@@ -4185,6 +5270,8 @@ export_wait_rename:
             lda     EVENT_TYPE
             cmp     #EVENT_FILE_RENAMED
             beq     export_rename_ok
+            cmp     #EVENT_FILE_NOT_FOUND
+            beq     export_rename_failed
             cmp     #EVENT_FILE_ERROR
             beq     export_rename_failed
             bra     export_wait_rename
@@ -4193,6 +5280,27 @@ export_rename_ok:
             rts
 export_rename_failed:
             sec
+            rts
+
+export_chdir_local:
+            lda     #<local_path
+            sta     KARGS_BUF
+            lda     #>local_path
+            sta     KARGS_BUF+1
+            lda     export_directory_length
+            sta     KARGS_BUFLEN
+            bra     export_chdir
+export_chdir_root:
+            lda     #<export_root_path
+            sta     KARGS_BUF
+            lda     #>export_root_path
+            sta     KARGS_BUF+1
+            lda     #1
+            sta     KARGS_BUFLEN
+export_chdir:
+            lda     local_drive
+            sta     KARGS_FILE_DRIVE
+            jsr     KERNEL_CHDIR
             rts
 
 export_next_event:
@@ -4215,8 +5323,33 @@ prepare_export_entry:
             jsr     catalog_get
             bcs     prepare_export_done
             lda     response_buffer+10
+            sta     export_source
             cmp     #SOURCE_SD
+            beq     prepare_export_sd_entry
+            cmp     #SOURCE_FLASH
+            beq     prepare_export_memory_entry
+            cmp     #SOURCE_GOLDEN
             bne     export_entry_invalid
+prepare_export_memory_entry:
+            lda     response_buffer+11
+            cmp     #FORMAT_GZIP
+            bne     export_entry_invalid
+            stz     export_path_length
+            lda     response_buffer+18
+            beq     export_entry_invalid
+            cmp     #LOCAL_ENTRY_NAME_MAX+1
+            bcs     export_entry_invalid
+            sta     export_basename_length
+            ldy     #0
+prepare_export_golden_basename_loop:
+            cpy     export_basename_length
+            beq     prepare_export_basename_done
+            lda     response_buffer+19,y
+            sta     EXPORT_BASENAME,y
+            iny
+            bra     prepare_export_golden_basename_loop
+
+prepare_export_sd_entry:
             lda     response_buffer+18
             beq     export_entry_invalid
             cmp     #192
@@ -4264,17 +5397,23 @@ prepare_export_basename_loop:
 prepare_export_basename_done:
             lda     #0
             sta     EXPORT_BASENAME,y
+            sty     install_name_length
+            ldx     #0
+prepare_export_progress_name:
+            lda     EXPORT_BASENAME,x
+            sta     install_name,x
+            beq     prepare_export_progress_name_done
+            inx
+            bra     prepare_export_progress_name
+prepare_export_progress_name_done:
 
             jsr     local_path_length
             sta     export_directory_length
             clc
             adc     export_basename_length
-            sta     export_destination_length
-            clc
-            adc     #6                  ; leading dot plus .part
             cmp     #128
             bcs     export_entry_invalid
-            sta     export_temporary_length
+            sta     export_destination_length
 
             ldx     #0
 prepare_export_prefix_loop:
@@ -4282,7 +5421,6 @@ prepare_export_prefix_loop:
             beq     prepare_export_destination_name
             lda     local_path,x
             sta     EXPORT_DESTINATION,x
-            sta     EXPORT_TEMPORARY,x
             inx
             bra     prepare_export_prefix_loop
 prepare_export_destination_name:
@@ -4298,31 +5436,119 @@ prepare_export_destination_loop:
 prepare_export_destination_done:
             stz     EXPORT_DESTINATION,x
 
-            ldx     export_directory_length
+            ; Staging and rollback names live beside the destination. Their
+            ; extra leading dot and suffixes must also fit MicroKernel's
+            ; 127-byte pathname limit.
+            lda     export_destination_length
+            clc
+            adc     #6                  ; leading dot plus ".part"
+            cmp     #128
+            bcs     export_entry_invalid
+            sta     export_temporary_length
+            lda     export_destination_length
+            clc
+            adc     #5                  ; leading dot plus ".bak"
+            sta     export_backup_length
+            lda     export_basename_length
+            clc
+            adc     #5
+            sta     export_backup_name_length
+
+            ldx     #0
+prepare_export_temp_prefix:
+            cpx     export_directory_length
+            beq     prepare_export_temp_dot
+            lda     local_path,x
+            sta     EXPORT_TEMPORARY,x
+            sta     EXPORT_BACKUP,x
+            inx
+            bra     prepare_export_temp_prefix
+prepare_export_temp_dot:
             lda     #'.'
             sta     EXPORT_TEMPORARY,x
+            sta     EXPORT_BACKUP,x
             inx
             ldy     #0
-prepare_export_temporary_name:
+prepare_export_temp_basename:
             cpy     export_basename_length
-            beq     prepare_export_temporary_suffix
+            beq     prepare_export_temp_suffix
             lda     EXPORT_BASENAME,y
             sta     EXPORT_TEMPORARY,x
-            inx
+            sta     EXPORT_BACKUP,x
             iny
-            bra     prepare_export_temporary_name
-prepare_export_temporary_suffix:
+            inx
+            bra     prepare_export_temp_basename
+prepare_export_temp_suffix:
             ldy     #0
 -           lda     export_part_suffix,y
-            beq     prepare_export_temporary_done
             sta     EXPORT_TEMPORARY,x
             inx
             iny
-            bra     -
-prepare_export_temporary_done:
-            stz     EXPORT_TEMPORARY,x
+            cmp     #0
+            bne     -
+
+            ldx     export_directory_length
+            lda     #'.'
+            sta     EXPORT_BACKUP_NAME
+            inx
+            ldy     #0
+prepare_export_backup_basename:
+            cpy     export_basename_length
+            beq     prepare_export_backup_suffix
+            lda     EXPORT_BASENAME,y
+            sta     EXPORT_BACKUP,x
+            sta     EXPORT_BACKUP_NAME+1,y
+            inx
+            iny
+            bra     prepare_export_backup_basename
+prepare_export_backup_suffix:
+            ldy     #0
+-           lda     export_backup_suffix,y
+            sta     EXPORT_BACKUP,x
+            inx
+            iny
+            cmp     #0
+            bne     -
+            ldx     #0
+            ldy     export_directory_length
+prepare_export_backup_name:
+            lda     EXPORT_BACKUP,y
+            sta     EXPORT_BACKUP_NAME,x
+            inx
+            iny
+            cmp     #0
+            bne     prepare_export_backup_name
+            jsr     prepare_export_display_name
             clc
 prepare_export_done:
+            rts
+
+; The progress dialog shows the actual K2-SD destination, not just the source
+; basename. Keep the rightmost 55 characters when a deep path exceeds the
+; modal width, so the filename and nearest directory remain visible.
+prepare_export_display_name:
+            stz     export_basename_start
+            lda     export_destination_length
+            cmp     #56
+            bcc     prepare_export_display_length_ready
+            sec
+            sbc     #55
+            sta     export_basename_start
+            lda     #55
+prepare_export_display_length_ready:
+            sta     install_name_length
+            ldx     #0
+            ldy     export_basename_start
+prepare_export_display_name_loop:
+            cpx     install_name_length
+            beq     prepare_export_display_name_done
+            lda     EXPORT_DESTINATION,y
+            sta     install_name,x
+            inx
+            iny
+            bra     prepare_export_display_name_loop
+prepare_export_display_name_done:
+            stz     install_name,x
             rts
 export_entry_invalid:
             lda     #$e8
@@ -4603,6 +5829,8 @@ response_wait:
             sec
             rts
 response_ready:
+            cmp     #MAX_PAYLOAD+1
+            bcs     response_bad_count
             sta     response_length
             ldx     #$ff
 -           dex
@@ -4702,6 +5930,39 @@ wait_key:
             lda     EVENT_KEY_RAW
             rts
 
+; The built-in K2 keyboard has RUN/STOP rather than Escape. Keep Escape as an
+; unadvertised convenience for external PS/2 keyboards, but do not let normal
+; command keys dismiss an informational screen accidentally.
+wait_break_key:
+            jsr     wait_key
+            cmp     #KEY_BREAK
+            beq     wait_break_key_done
+            cmp     #KEY_ESC
+            bne     wait_break_key
+wait_break_key_done:
+            rts
+
+; A host reset restarts the CPU and kernel while the keyboard itself remains
+; live. If reset happens on key-down, the new BASIC session can receive a
+; typematic copy of that key. Consume events through the matching release
+; before asserting the FPGA reset registers.
+wait_restart_key_release:
+            lda     #<event_buffer
+            sta     KARGS_EVENT_DEST
+            lda     #>event_buffer
+            sta     KARGS_EVENT_DEST+1
+            jsr     KERNEL_NEXT_EVENT
+            bcc     +
+            jsr     KERNEL_YIELD
+            bra     wait_restart_key_release
++           lda     EVENT_TYPE
+            cmp     #EVENT_KEY_RELEASED
+            bne     wait_restart_key_release
+            lda     EVENT_KEY_RAW
+            cmp     restart_key_raw
+            bne     wait_restart_key_release
+            rts
+
 putchar:    jsr     KERNEL_PUTCH
             rts
 
@@ -4739,62 +6000,75 @@ print_hex_byte:
 hex_digits:         .text "0123456789ABCDEF"
 decimal_powers_lo:  .byte <10000,<1000,<100,<10,<1
 decimal_powers_hi:  .byte >10000,>1000,>100,>10,>1
-banner_text:        .text $0a,"K2 FPGA Manager",$0a,0
-context_text:       .text "Catalog context: ",0
-running_text:       .text "Running: context ",0
-offline_text:       .text "RP2040 supervisor is offline.",$0a,0
-version_text:       .text "Unsupported supervisor version $",0
-error_text:         .text "Supervisor command failed, error",0
+banner_text:        .text $0a,"K2 Core Manager",$0a,0
+context_text:       .text "Context ",0
+running_text:       .text "booted context ",0
+offline_text:       .text "FPGA Manager is unavailable.",$0a,0
+version_text:       .text "Unsupported FPGA Manager version $",0
+error_text:         .text "FPGA Manager command failed, error",0
 exit_text:          .text "Press any key to reset the system.",0
-ui_title_text:      .text "Core Catalog",0
-ui_local_title_text:.text "Local SD Browser",0
-ui_help_title_text: .text "Keyboard Help",0
-ui_boot_log_title_text: .text "RP2040 Boot Log",0
-ui_columns_text:    .text ">*+ Source Core image",0
-ui_local_columns_text: .text "> Local SD directory / FPGA image",0
-help_columns_text:  .text "Key controls",0
-boot_log_columns_text: .text "RP2040 diagnostics (oldest to newest)",0
-local_sd_error_text: .text "Local SD unreadable or unsupported. Use a FAT-formatted card; R retries.",0
-local_truncated_text: .text "Directory has over 255 entries; only the first 255 are shown.",0
-manager_sd_unavailable_text: .text "Manager SD is absent. Use F3 on a gzip image to write context flash.",0
+ui_help_title_text: .text "Help - F1   ",0
+ui_boot_log_title_text: .text "Boot Log",0
+ui_brand_text:      .text "wildbits ",0
+ui_brand_k2_text:   .text "k2",0
+ui_manager_text:    .text "Core manager",0
+ui_catalog_tab_text:.text " RP2040 catalog ",0
+ui_local_tab_text:  .text " Local SD ",0
+ui_cursor_legend_text: .text GLYPH_CURSOR," cursor   ",0
+ui_default_legend_text:.text GLYPH_DEFAULT," default   ",0
+ui_booted_legend_text: .text GLYPH_BOOTED," booted ",0
+ui_columns_text:    .text "  SRC    PATH",0
+ui_local_columns_text: .text "SRC       PATH",0
+boot_log_columns_text: .text "RP2040 diagnostics",0
+local_sd_error_text: .text "Can't read K2 SD. Insert a FAT-formatted card and press R.",0
+local_truncated_text: .text "Some entries omitted: over 255 files or a filename longer than 62 characters.",0
+manager_sd_unavailable_text: .text "No RP2040 SD card. Press F3 to copy a gzip core directly to flash.",0
 boot_log_empty_text:.text "No boot diagnostics were recorded.",0
-boot_log_hint_text: .text "Current boot and runtime reconfiguration attempts.",0
-help_hint_text:     .text "Press any key to return to the previous manager view.",0
-running_once_text:  .text "Running highlighted core once; saved default is unchanged...",0
+boot_log_hint_text: .text "Recent startup activity.",0
+running_once_text:  .text "Starting core without changing the default...",0
 context_mismatch_text: .text "Cannot run another context. Change DIP switches and restart the K2.",0
-booting_text:       .text "Saving as default and reconfiguring...",0
-default_saved_text: .text "Default saved; running core is unchanged.",0
-restart_supervisor_text: .text "Restarting RP2040 and repeating FPGA loading...",0
+booting_text:       .text "Saving as default and starting core...",0
+default_saved_text: .text "Default core saved.",0
+restart_supervisor_text: .text "Restarting FPGA Manager and reloading the core...",0
 restart_computer_text: .text "Restarting the K2...",0
-key_bar_text:       .text " F1 Help  Tab Local SD  Enter Run  F3 Flash  F5 Copy  F7 Default  S Save+Run ",0
-local_key_bar_text: .text " F1 Help  Tab Catalog  Enter Open  F3 Flash  F5 Copy to RP SD  Bksp Parent ",0
-boot_log_key_bar_text: .text " Press any key to return to the manager ",0
-local_target_text:  .text "Copy destination: manager SD context ",0
-local_no_manager_sd_text: .text "Manager SD absent; direct-flash context ",0
-scan_text:          .text "Scanning image and calculating CRC...",0
-install_text:       .text "Installing to manager SD; do not power off...",0
-install_done_text:  .text "Installed and highlighted in the manager catalog.",0
-direct_flash_text:  .text "Erasing context flash, then writing local gzip; do not power off...",0
-direct_flash_done_text: .text "Direct flash upload verified; manager SD was not used.",0
-direct_flash_unavailable_text: .text "F3 requires a highlighted gzip image no larger than 2 MiB.",0
-flash_copy_text:    .text "Copying selected manager-SD gzip to flash; do not power off...",0
-flash_copy_done_text: .text "Flash copy verified and catalog refreshed.",0
-export_start_text:  .text "Copying manager-SD image to local K2 SD; do not power off...",0
-export_done_text:   .text "Export verified on local K2 SD.",0
-delete_prompt_text: .text "Delete this image from RP2040 manager SD?",0
-delete_confirm_text:.text "Press Y to delete permanently; any other key cancels.",0
+key_bar_text:       .text "Enter",KEY_BAR_TOGGLE," Boot   ",KEY_BAR_TOGGLE,"F3",KEY_BAR_TOGGLE," Copy to flash   ",KEY_BAR_TOGGLE,"F7",KEY_BAR_TOGGLE," Set default   ",KEY_BAR_TOGGLE,"DEL",KEY_BAR_TOGGLE," Delete",0
+local_key_bar_text: .text "Enter",KEY_BAR_TOGGLE," Open   ",KEY_BAR_TOGGLE,"F3",KEY_BAR_TOGGLE," Copy to flash   ",KEY_BAR_TOGGLE,"F5",KEY_BAR_TOGGLE," Copy to RP SD   ",KEY_BAR_TOGGLE,"DEL",KEY_BAR_TOGGLE," Parent directory",0
+catalog_key_bar_text_2: .text "F1",KEY_BAR_TOGGLE," Help   ",KEY_BAR_TOGGLE,"F2",KEY_BAR_TOGGLE," Diagnostics   ",KEY_BAR_TOGGLE,"F5",KEY_BAR_TOGGLE," Copy to K2 SD   ",KEY_BAR_TOGGLE,"Tab",KEY_BAR_TOGGLE," Switch view   ",KEY_BAR_TOGGLE,"Q",KEY_BAR_TOGGLE," Exit",0
+key_bar_text_2:     .text "F1",KEY_BAR_TOGGLE," Help   ",KEY_BAR_TOGGLE,"F2",KEY_BAR_TOGGLE," Diagnostics   ",KEY_BAR_TOGGLE,"Tab",KEY_BAR_TOGGLE," Switch view   ",KEY_BAR_TOGGLE,"Q",KEY_BAR_TOGGLE," Exit",0
+boot_log_key_bar_text: .text "RUN/STOP",KEY_BAR_TOGGLE," Close",0
+local_target_text:  .text "Copy destination: RP2040 SD, context ",0
+local_no_manager_sd_text: .text "No RP2040 SD card. Flash context ",0
+scan_text:          .text "Checking image...",0
+scan_cancelled_text:.text "Image check cancelled.",0
+install_text:       .text "Copying to RP2040 SD. Do not turn off the K2.",0
+install_done_text:  .text "Copied to RP2040 SD.",0
+direct_flash_text:  .text "Writing core to flash. Do not turn off the K2.",0
+direct_flash_done_text: .text "Core written to flash.",0
+direct_flash_unavailable_text: .text "Select a gzip core no larger than 2 MiB.",0
+flash_copy_text:    .text "Copying from RP2040 SD to flash. Do not turn off the K2.",0
+flash_copy_done_text: .text "Core written to flash.",0
+export_start_text:  .text "Copying to K2 SD. Do not turn off the K2.",0
+export_done_text:   .text "Copied to K2 SD.",0
+delete_prompt_text: .text "Delete this core from the RP2040 SD card?",0
+delete_confirm_text:.text "Press Y to delete it; RUN/STOP cancels.",0
 delete_cancelled_text: .text "Delete cancelled.",0
-delete_done_text:   .text "Image deleted from RP2040 manager SD.",0
-delete_unavailable_text: .text "Only manager-SD core images can be deleted.",0
-scan_progress_text: .text "Scanning and validating the local image",0
-install_progress_text: .text "Copying local image to RP2040 manager SD",0
-direct_flash_progress_text: .text "Copying local gzip directly to context flash",0
-flash_erase_progress_text: .text "Erasing the replaceable flash slot",0
-flash_write_progress_text: .text "Copying manager-SD image to flash",0
-flash_finalize_progress_text: .text "Verifying flash and committing metadata",0
+delete_done_text:   .text "Core deleted from RP2040 SD.",0
+delete_unavailable_text: .text "Only cores on RP2040 SD can be deleted.",0
+progress_scan_title:.text "Validating image",0
+progress_manager_title: .text "Installing to manager SD",0
+progress_flash_title:.text "Installing to flash",0
+progress_export_title:.text "Copying to K2 SD",0
+progress_cancel_hint:.text "RUN/STOP Cancel",0
+progress_locked_hint:.text "Keys locked until complete",0
+scan_progress_text: .text "Scanning image and calculating CRC...",0
+install_progress_text: .text "Do not power off",0
+direct_flash_progress_text: .text "Do not power off",0
+flash_erase_progress_text: .text "Do not power off - erasing flash",0
+flash_write_progress_text: .text "Do not power off - writing image",0
+flash_finalize_progress_text: .text "Do not power off - verifying flash",0
 flash_done_progress_text: .text "Flash copy complete",0
 flash_failed_progress_text: .text "Flash copy failed",0
-export_progress_text: .text "Copying RP2040 manager-SD image to local K2 SD",0
+export_progress_text: .text "Do not power off",0
 progress_separator_text: .text " / ",0
 progress_percent_text: .text "%   ",0
 progress_kib_text:  .text " KiB",0
@@ -4804,49 +6078,154 @@ source_auto_text:   .text "AUTO  ",0
 source_sd_text:     .text "SD    ",0
 source_flash_text:  .text "FLASH ",0
 source_golden_text: .text "GOLDEN",0
+source_dir_text:    .text "DIR ",0
+source_file_text:   .text "FILE",0
 export_part_suffix: .text ".part",0
+export_backup_suffix: .text ".bak",0
+export_root_path:   .text "/",0
+; row, column, color, text pointer. Section headings and the two columns are
+; separate records so their colors match the help mockup.
+ui_help_layout:
+            .byte 17,7,UI_COLOR_ACCENT
+            .word help_section_global
+            .byte 18,8,UI_COLOR_ORANGE
+            .word help_key_f1
+            .byte 18,18,UI_COLOR_NORMAL
+            .word help_global_f1
+            .byte 19,8,UI_COLOR_ORANGE
+            .word help_key_f2
+            .byte 19,18,UI_COLOR_NORMAL
+            .word help_global_f2
+            .byte 20,8,UI_COLOR_ORANGE
+            .word help_key_tab
+            .byte 20,18,UI_COLOR_NORMAL
+            .word help_global_tab
+            .byte 21,8,UI_COLOR_ORANGE
+            .word help_key_break
+            .byte 21,18,UI_COLOR_NORMAL
+            .word help_global_break
+            .byte 22,8,UI_COLOR_ORANGE
+            .word help_key_f8
+            .byte 22,18,UI_COLOR_NORMAL
+            .word help_global_f8
+            .byte 23,8,UI_COLOR_ORANGE
+            .word help_key_q
+            .byte 23,18,UI_COLOR_NORMAL
+            .word help_global_q
 
-ui_help_line_ptrs:
-            .word help_line_f1, help_line_f2, help_line_f3, help_line_f5
-            .word help_line_f7, help_line_f8, help_line_enter, help_line_tab
-            .word help_line_up_down, help_line_left_right, help_line_delete
-            .word help_line_s, help_line_r, help_line_quit
-help_line_f1:       .text "F1          Show this help screen",0
-help_line_f2:       .text "F2          Show the RP2040 boot log",0
-help_line_f3:       .text "F3          Copy highlighted gzip core to context flash",0
-help_line_f5:       .text "F5          Copy selected image between the two SD cards",0
-help_line_f7:       .text "F7          Save highlighted catalog entry as default; do not run",0
-help_line_f8:       .text "F8          Restart RP2040 and repeat FPGA loading",0
-help_line_enter:    .text "Enter       Catalog: run once; Local: open directory",0
-help_line_tab:      .text "Tab         Switch between catalog and local SD",0
-help_line_up_down:  .text "Up/Down     Move one entry",0
-help_line_left_right: .text "Left/Right  Catalog: context; Local: move one page",0
-help_line_delete:   .text "Del/Bksp    Catalog: delete SD image; Local: parent directory",0
-help_line_s:        .text "S           Save selected default and run immediately",0
-help_line_r:        .text "R           Refresh the current view",0
-help_line_quit:     .text "Esc/Q       Restart the K2",0
+            .byte 25,7,UI_COLOR_ACCENT
+            .word help_section_catalog
+            .byte 26,8,UI_COLOR_ORANGE
+            .word help_key_up_down
+            .byte 26,18,UI_COLOR_NORMAL
+            .word help_move_cursor
+            .byte 27,8,UI_COLOR_ORANGE
+            .word help_key_left_right
+            .byte 27,18,UI_COLOR_NORMAL
+            .word help_catalog_context
+            .byte 28,8,UI_COLOR_ORANGE
+            .word help_key_enter
+            .byte 28,18,UI_COLOR_NORMAL
+            .word help_catalog_enter
+            .byte 29,8,UI_COLOR_ORANGE
+            .word help_key_f7
+            .byte 29,18,UI_COLOR_NORMAL
+            .word help_catalog_f7
+            .byte 30,8,UI_COLOR_ORANGE
+            .word help_key_s
+            .byte 30,18,UI_COLOR_NORMAL
+            .word help_catalog_s
+            .byte 31,8,UI_COLOR_ORANGE
+            .word help_key_f3
+            .byte 31,18,UI_COLOR_NORMAL
+            .word help_catalog_f3
+            .byte 32,8,UI_COLOR_ORANGE
+            .word help_key_f5
+            .byte 32,18,UI_COLOR_NORMAL
+            .word help_catalog_f5
+            .byte 33,8,UI_COLOR_ORANGE
+            .word help_key_delete
+            .byte 33,18,UI_COLOR_NORMAL
+            .word help_catalog_delete
 
-; SuperBASIC-compatible text palette with the generated logo's requested
-; green, cream, and dark trace in entries 3, 6, and 8.
+            .byte 35,7,UI_COLOR_ACCENT
+            .word help_section_local
+            .byte 36,8,UI_COLOR_ORANGE
+            .word help_key_up_down
+            .byte 36,18,UI_COLOR_NORMAL
+            .word help_move_cursor
+            .byte 37,8,UI_COLOR_ORANGE
+            .word help_key_left_right
+            .byte 37,18,UI_COLOR_NORMAL
+            .word help_local_page
+            .byte 38,8,UI_COLOR_ORANGE
+            .word help_key_enter
+            .byte 38,18,UI_COLOR_NORMAL
+            .word help_local_enter
+            .byte 39,8,UI_COLOR_ORANGE
+            .word help_key_delete
+            .byte 39,18,UI_COLOR_NORMAL
+            .word help_local_delete
+            .byte 40,8,UI_COLOR_ORANGE
+            .word help_key_f3
+            .byte 40,18,UI_COLOR_NORMAL
+            .word help_local_f3
+            .byte 41,8,UI_COLOR_ORANGE
+            .word help_key_f5
+            .byte 41,18,UI_COLOR_NORMAL
+            .word help_local_f5
+            .byte $ff
+
+help_section_global:  .text "Global",0
+help_section_catalog: .text "RP2040 catalog",0
+help_section_local:   .text "Local SD browser",0
+help_key_f1:          .text "F1",0
+help_key_f2:          .text "F2",0
+help_key_f3:          .text "F3",0
+help_key_f5:          .text "F5",0
+help_key_f7:          .text "F7",0
+help_key_f8:          .text "F8",0
+help_key_tab:         .text "Tab",0
+help_key_s:           .text "S",0
+help_key_q:           .text "Q",0
+help_key_break:       .text "RUN/STOP",0
+help_key_up_down:     .text "Up/Down",0
+help_key_left_right:  .text "Left/Right",0
+help_key_enter:       .text "Enter",0
+help_key_delete:      .text "DEL",0
+help_global_f1:       .text "This help screen",0
+help_global_f2:       .text "Boot diagnostics",0
+help_global_tab:      .text "Switch catalog / local SD browser",0
+help_global_break:    .text "Close screen / cancel image check",0
+help_global_f8:       .text "Restart FPGA Manager and reload the core",0
+help_global_q:        .text "Restart the K2",0
+help_move_cursor:     .text "Move cursor",0
+help_catalog_context: .text "Switch context",0
+help_catalog_enter:   .text "Boot selected image now",0
+help_catalog_f7:      .text "Save as default for this context",0
+help_catalog_s:       .text "Save as default and boot",0
+help_catalog_f3:      .text "Copy selected image to flash",0
+help_catalog_f5:      .text "Copy selected image to K2 SD",0
+help_catalog_delete:  .text "Delete selected manager-SD image",0
+help_local_page:      .text "Move one page",0
+help_local_enter:     .text "Open directory",0
+help_local_delete:    .text "Parent directory",0
+help_local_f3:        .text "Copy gzip core to flash",0
+help_local_f5:        .text "Copy core to manager SD",0
+
+; Wildbits CI palette used by the Core Manager design template.
 ui_text_palette:
-            .dword $ff000000, $ff666666, $ff0000aa, $ff59ff72
-            .dword $ffc041ea, $ff874800, $ffffd166, $ff57dbff
-            .dword $ff3f3f28, $ffaaaa8a, $ff5555ff, $ff55ff55
+            .dword $ff29286a, $ff72bfd0, $fff4efff, $ffffc533
+            .dword $ffff6638, $ff45c82f, $fffb4b4e, $ff575687
+            .dword $ff3d3b7c, $ffaaaa8a, $ff5555ff, $ff55ff55
             .dword $ffff8ded, $ffff0000, $ffffff55, $ffffffff
 
-; Color IDs from the generated logo become F256 text attributes.  Each logo
-; cell uses black as its background; ID 0 is therefore invisible black.
-ui_logo_color_attrs:
-            .byte $00, $30, $60, $80
-
-            .include "fpga_manager_logo_80x5.inc"
-
 ui_line_lo:
-            .for row := 0, row < 60, row += 1
+            .for row := 0, row < UI_SCREEN_ROWS, row += 1
             .byte <(TEXT_BUFFER+row*80)
             .next
 ui_line_hi:
-            .for row := 0, row < 60, row += 1
+            .for row := 0, row < UI_SCREEN_ROWS, row += 1
             .byte >(TEXT_BUFFER+row*80)
             .next
 
@@ -4865,8 +6244,13 @@ context:            .byte 0
 catalog_count:      .byte 0
 catalog_index:      .byte 0
 cursor_index:       .byte 0
+catalog_top:        .byte 0
+catalog_draw_index: .byte 0
 selected_index:     .byte 0
 selected_source:    .byte 0
+catalog_refreshing: .byte 0
+highlight_source:   .byte $ff
+highlight_found:    .byte 0
 running_valid:      .byte 0
 running_context:    .byte 0
 running_source:     .byte 0
@@ -4875,12 +6259,15 @@ boot_log_count:     .byte 0
 boot_log_index:     .byte 0
 boot_log_line_length: .byte 0
 help_line_index:    .byte 0
+restart_key_raw:    .byte 0
 ui_entry_index:     .byte 0
 ui_entry_source:    .byte 0
 ui_entry_flags:     .byte 0
 ui_column:          .byte 0
 ui_row:             .byte 0
 ui_color:           .byte 0
+ui_modal_row:       .byte 0
+ui_modal_color:     .byte 0
 ui_border_left:     .byte 0
 ui_border_right:    .byte 0
 status_pointer:     .word 0
@@ -4905,10 +6292,13 @@ local_truncated:    .byte 0
 manager_sd_available: .byte 0
 local_event_flags:  .byte 0
 local_name_length:  .byte 0
+local_append_base_length: .byte 0
+local_append_name_length: .byte 0
 highlight_pending:  .byte 0
 transfer_phase:     .byte 0
 transfer_stream:    .byte 0
 transfer_failed:    .byte 0
+transfer_cancelled: .byte 0
 transfer_format:    .byte 0
 transfer_target:    .byte 0
 upload_started:     .byte 0
@@ -4917,29 +6307,39 @@ transfer_saved_error: .byte 0
 transfer_progress:  .byte 0
 export_stream:      .byte 0
 export_stream_open: .byte 0
-export_verified:    .byte 0
+export_temporary_created: .byte 0
+export_backup_created: .byte 0
+export_source:      .byte 0
 export_path_length: .byte 0
 export_basename_start: .byte 0
 export_basename_length: .byte 0
 export_directory_length: .byte 0
 export_destination_length: .byte 0
 export_temporary_length: .byte 0
+export_backup_length: .byte 0
+export_backup_name_length: .byte 0
 export_write_offset: .byte 0
 export_write_remaining: .byte 0
 copy_state:         .byte 0
 copy_error:         .byte 0
 progress_activity:  .byte 0
+progress_modal_visible: .byte 0
+progress_modal_kind:.byte 0
 progress_percent:   .byte 0
 progress_filled:    .byte 0
+progress_partial:   .byte 0
 progress_ratio_limit: .byte 0
 progress_ratio_result: .byte 0
 progress_label:     .word 0
+progress_drawn_label: .word 0
 progress_current:   .fill 4,0
 progress_total:     .fill 4,0
 progress_work:      .fill 4,0
 decimal_value:      .fill 2,0
 decimal_started:    .byte 0
 decimal_digit:      .byte 0
+decimal_width:      .byte 0
+decimal_padding_start: .byte 0
 delete_path_length: .byte 0
 delete_path:        .fill 192,0
 chunk_length:       .byte 0
@@ -4957,8 +6357,10 @@ file_tail:          .fill 8,0
 local_path:         .fill 128,0
 filename:           .fill 128,0
 install_name:       .fill LOCAL_ENTRY_NAME_MAX+1,0
-local_trash:        .fill 128,0
+; Directory event names can occupy the full one-byte length range even when
+; they are too long for the visible 62-character cache entry.
+local_trash:        .fill 256,0
 begin_payload:      .fill LOCAL_ENTRY_NAME_MAX+12,0
 io_buffer:          .fill MAX_PAYLOAD,0
 
-            .cerror * > $c000, "K2 FPGA Manager overlaps the video buffer"
+            .cerror * > $c000, "K2 Core Manager overlaps the video buffer"

@@ -401,7 +401,8 @@ int main()
     boot_config_init();
 
     // Holding the active-low system reset for at least 500 ms during manager
-    // startup forces recovery. Only physical context 1 has an embedded image.
+    // startup forces recovery. Physical contexts 1 and 4 expose the same
+    // embedded image.
     bool force_golden = !gpio_get(FPGA_SYSTEM_RSTn);
     sleep_ms(500);
     force_golden = force_golden && !gpio_get(FPGA_SYSTEM_RSTn);
@@ -438,7 +439,7 @@ int main()
     method = program_selected_context(dip_switches, sd_mounted, force_golden);
 
     if (method == FPGA_METHOD_NONE) {
-        panic("No usable FPGA image; select context 1 for recovery\n");
+        panic("No usable FPGA image; select context 1 or 4 for recovery\n");
     }
 
     // measure programming time
@@ -976,9 +977,9 @@ fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice)
     const unsigned int slot = sw_choice & 0x03;
     const GoldenImageInfo* image = golden_image_for_context(slot);
     if (!image) {
-        printf("No embedded recovery image for context %u; use context 1\n",
+        printf("No embedded recovery image for context %u; use context 1 or 4\n",
                static_cast<unsigned>(slot + 1));
-        boot_logf("No GOLDEN for context %u; use context 1",
+        boot_logf("No GOLDEN for context %u; use context 1 or 4",
                   static_cast<unsigned>(slot + 1));
         return FPGA_METHOD_NONE;
     }
@@ -1068,13 +1069,13 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
 
     if (method == FPGA_METHOD_NONE) {
         if (golden_image_for_context(slot)) {
-            printf("Selected image and fallbacks failed; trying context-1 recovery\n");
+            printf("Selected image and fallbacks failed; trying embedded recovery\n");
             boot_logf("Fallback: mutable sources -> GOLDEN");
             method = program_fpga_from_golden_slot(slot);
         } else {
-            printf("No usable image for context %u; use context 1 for recovery\n",
+            printf("No usable image for context %u; use context 1 or 4 for recovery\n",
                    static_cast<unsigned>(slot + 1));
-            boot_logf("No usable image; switch to context 1 for recovery");
+            boot_logf("No usable image; switch to context 1 or 4 for recovery");
         }
     }
     return method;

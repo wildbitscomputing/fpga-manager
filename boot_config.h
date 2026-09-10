@@ -5,8 +5,15 @@
 
 constexpr size_t kBootContextCount = 4;
 constexpr uint8_t kGoldenRecoveryContext = 0;
+constexpr uint8_t kGoldenLegacyRecoveryContext = 3;
 constexpr size_t kBootPathLength = 192;
 constexpr size_t kFlashLabelLength = 128;
+
+constexpr bool context_has_golden_recovery(uint8_t context)
+{
+    return context == kGoldenRecoveryContext ||
+           context == kGoldenLegacyRecoveryContext;
+}
 
 enum class BootSource : uint8_t {
     Auto = 0,
@@ -36,7 +43,8 @@ struct BootRuntimeStatus {
 
 // Loads the newest valid metadata journal record. Invalid or erased metadata
 // selects the embedded recovery image for context 1, AUTO for contexts 2-4,
-// and empty flash labels.
+// and empty flash labels. Context 4 can use the same recovery payload as
+// context 1, but it is not the factory-default selection.
 void boot_config_init();
 
 const BootSelection& boot_config_selection(uint8_t context);

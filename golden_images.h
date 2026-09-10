@@ -9,8 +9,8 @@ struct GoldenImageInfo {
     const char* label;
 };
 
-// Returns the immutable context-1 recovery image. Other contexts deliberately
-// have no embedded fallback and return nullptr.
+// Returns the one immutable recovery payload for contexts 1 and 4. Context 4
+// aliases the context-1 image; contexts 2 and 3 return nullptr.
 const GoldenImageInfo* golden_image_for_context(uint8_t context);
 
 inline size_t golden_image_size(const GoldenImageInfo& image)
