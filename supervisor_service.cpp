@@ -128,6 +128,13 @@ enum CopyState : uint8_t {
     kCopyFailed = 5,
 };
 
+enum class CatalogReadSource : uint8_t {
+    None,
+    Sd,
+    Flash,
+    Golden,
+};
+
 constexpr uint8_t kCatalogFlagSelected = 0x01;
 constexpr uint8_t kCatalogFlagRunning = 0x02;
 constexpr size_t kCatalogCapacity = 32;
@@ -178,7 +185,10 @@ uint8_t copy_buffer[1024];
 FIL copy_source;
 bool copy_source_open = false;
 FIL sd_read_source;
-bool sd_read_source_open = false;
+CatalogReadSource catalog_read_source = CatalogReadSource::None;
+const uint8_t* memory_read_source = nullptr;
+bool catalog_read_crc_expected = false;
+uint32_t catalog_read_expected_crc = 0;
 uint32_t sd_read_size = 0;
 uint32_t sd_read_offset = 0;
 mz_ulong sd_read_crc = MZ_CRC32_INIT;
@@ -499,7 +509,7 @@ uint8_t status_byte()
     if (upload_active && upload_target == kTargetFlashGzip) {
         status |= 0x08;
     }
-    if (sd_read_source_open) {
+    if (catalog_read_source != CatalogReadSource::None) {
         status |= 0x10;
     }
     if (last_error != kErrorNone) {
@@ -531,7 +541,6 @@ void reset_transport()
     pio_sm_set_enabled(service_pio, service_sm, false);
     pio_sm_clear_fifos(service_pio, service_sm);
     pio_sm_restart(service_pio, service_sm);
-    pio_sm_set_enabled(service_pio, service_sm, true);
 }
 
 void transfer_frame()
@@ -559,7 +568,14 @@ void transfer_frame()
     dma_channel_configure(rx_dma, &rx_config, rx_words,
                           &service_pio->rxf[service_sm], kFrameSize, false);
 
+    // Arm both DMA channels before enabling the state machine. Confirm that
+    // the TX DMA has preloaded at least the first byte while the PIO is stopped,
+    // then let the PIO wait for a complete CSn high-to-low frame boundary.
     dma_start_channel_mask((1u << tx_dma) | (1u << rx_dma));
+    while (pio_sm_is_tx_fifo_empty(service_pio, service_sm)) {
+        tight_loop_contents();
+    }
+    pio_sm_set_enabled(service_pio, service_sm, true);
     dma_channel_wait_for_finish_blocking(rx_dma);
     while (!gpio_get(kCsPin)) {
         tight_loop_contents();
@@ -1114,19 +1130,34 @@ bool delete_catalog_sd_image(uint8_t context, const char* path)
     return true;
 }
 
-void close_sd_read_source()
+void close_catalog_read_source()
 {
-    if (sd_read_source_open) {
+    if (catalog_read_source == CatalogReadSource::Sd) {
         f_close(&sd_read_source);
-        sd_read_source_open = false;
     }
+    catalog_read_source = CatalogReadSource::None;
+    memory_read_source = nullptr;
+    catalog_read_crc_expected = false;
+    catalog_read_expected_crc = 0;
     sd_read_cache_valid = false;
     sd_read_cache_count = 0;
 }
 
+void start_catalog_read(uint32_t size)
+{
+    sd_read_size = size;
+    sd_read_offset = 0;
+    sd_read_crc = MZ_CRC32_INIT;
+    sd_read_cache_offset = 0;
+    sd_read_cache_count = 0;
+    sd_read_cache_valid = false;
+    last_error = kErrorNone;
+}
+
 bool begin_catalog_sd_read(uint8_t context, const char* path)
 {
-    if (upload_active || copy_source_open || sd_read_source_open) {
+    if (upload_active || copy_source_open ||
+        catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
     }
@@ -1164,21 +1195,66 @@ bool begin_catalog_sd_read(uint8_t context, const char* path)
         return false;
     }
 
-    sd_read_source_open = true;
-    sd_read_size = static_cast<uint32_t>(source_size);
-    sd_read_offset = 0;
-    sd_read_crc = MZ_CRC32_INIT;
-    sd_read_cache_offset = 0;
-    sd_read_cache_count = 0;
-    sd_read_cache_valid = false;
-    last_error = kErrorNone;
+    catalog_read_source = CatalogReadSource::Sd;
+    start_catalog_read(static_cast<uint32_t>(source_size));
     return true;
 }
 
-bool read_catalog_sd_data(uint32_t requested_offset, uint8_t requested_count,
-                          size_t* response_length)
+bool begin_catalog_golden_read(uint8_t context)
 {
-    if (!sd_read_source_open) {
+    if (upload_active || copy_source_open ||
+        catalog_read_source != CatalogReadSource::None) {
+        last_error = kErrorUploadActive;
+        return false;
+    }
+    const GoldenImageInfo* image = golden_image_for_context(context);
+    if (!image) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+
+    const size_t image_size = golden_image_size(*image);
+    if (image_size == 0 || image_size > UINT32_MAX) {
+        last_error = kErrorSize;
+        return false;
+    }
+    catalog_read_source = CatalogReadSource::Golden;
+    memory_read_source = image->start;
+    start_catalog_read(static_cast<uint32_t>(image_size));
+    return true;
+}
+
+bool begin_catalog_flash_read(uint8_t context)
+{
+    if (upload_active || copy_source_open ||
+        catalog_read_source != CatalogReadSource::None) {
+        last_error = kErrorUploadActive;
+        return false;
+    }
+    if (context >= kBootContextCount || !flash_slot_has_gzip(context)) {
+        last_error = kErrorBadSelection;
+        return false;
+    }
+    const FlashSlotInfo slot = boot_config_flash_slot(context);
+    if (!slot.valid || slot.compressed_size < 18 ||
+        slot.compressed_size > kFlashSlotSize) {
+        last_error = kErrorSize;
+        return false;
+    }
+
+    catalog_read_source = CatalogReadSource::Flash;
+    memory_read_source = reinterpret_cast<const uint8_t*>(
+        kXipBase + kFlashSlotOffsets[context]);
+    start_catalog_read(slot.compressed_size);
+    catalog_read_crc_expected = true;
+    catalog_read_expected_crc = slot.compressed_crc;
+    return true;
+}
+
+bool read_catalog_data(uint32_t requested_offset, uint8_t requested_count,
+                       size_t* response_length)
+{
+    if (catalog_read_source == CatalogReadSource::None) {
         last_error = kErrorNoRead;
         return false;
     }
@@ -1203,9 +1279,15 @@ bool read_catalog_sd_data(uint32_t requested_offset, uint8_t requested_count,
     const uint32_t remaining = sd_read_size - sd_read_offset;
     const UINT amount = static_cast<UINT>(
         remaining < requested_count ? remaining : requested_count);
-    UINT count = 0;
-    const FRESULT result = f_read(&sd_read_source, sd_read_cache, amount,
-                                  &count);
+    UINT count = amount;
+    FRESULT result = FR_OK;
+    if (catalog_read_source == CatalogReadSource::Sd) {
+        count = 0;
+        result = f_read(&sd_read_source, sd_read_cache, amount, &count);
+    } else {
+        std::memcpy(sd_read_cache, memory_read_source + sd_read_offset,
+                    amount);
+    }
     if (result != FR_OK || (count == 0 && remaining != 0)) {
         last_error = kErrorCopyRead;
         return false;
@@ -1223,9 +1305,9 @@ bool read_catalog_sd_data(uint32_t requested_offset, uint8_t requested_count,
     return true;
 }
 
-bool finish_catalog_sd_read(uint32_t nonce, size_t* response_length)
+bool finish_catalog_read(uint32_t nonce, size_t* response_length)
 {
-    if (!sd_read_source_open) {
+    if (catalog_read_source == CatalogReadSource::None) {
         last_error = kErrorNoRead;
         return false;
     }
@@ -1235,7 +1317,12 @@ bool finish_catalog_sd_read(uint32_t nonce, size_t* response_length)
     }
     const uint32_t final_size = sd_read_size;
     const uint32_t final_crc = static_cast<uint32_t>(sd_read_crc);
-    close_sd_read_source();
+    if (catalog_read_crc_expected && final_crc != catalog_read_expected_crc) {
+        close_catalog_read_source();
+        last_error = kErrorCrc;
+        return false;
+    }
+    close_catalog_read_source();
     write_le32(command_response, nonce);
     write_le32(command_response + 4, final_size);
     write_le32(command_response + 8, final_crc);
@@ -1389,7 +1476,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             copy_state = kCopyFailed;
             copy_error = kErrorNoUpload;
         }
-        close_sd_read_source();
+        close_catalog_read_source();
         abort_upload();
         last_error = kErrorNone;
         break;
@@ -1748,16 +1835,50 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
             const uint8_t context = request[kHeaderSize + 4];
-            const size_t path_length = request[kHeaderSize + 5];
-            if (context >= kBootContextCount || path_length == 0 ||
+            BootSource source = BootSource::Sd;
+            size_t path_length = request[kHeaderSize + 5];
+            const uint8_t* path_bytes = request + kHeaderSize + 6;
+            size_t expected_length = 6 + path_length;
+
+            // New clients prefix source-aware reads with $ff. The legacy
+            // SD-only layout remains valid; its formerly-invalid empty path
+            // is interpreted as GOLDEN for compatibility with interim builds.
+            if (path_length == 0xff) {
+                if (length < 8) {
+                    last_error = kErrorBadSelection;
+                    break;
+                }
+                source = static_cast<BootSource>(request[kHeaderSize + 6]);
+                path_length = request[kHeaderSize + 7];
+                path_bytes = request + kHeaderSize + 8;
+                expected_length = 8 + path_length;
+            } else if (path_length == 0) {
+                source = BootSource::Golden;
+            }
+
+            if (context >= kBootContextCount ||
+                static_cast<uint8_t>(source) <
+                    static_cast<uint8_t>(BootSource::Sd) ||
+                static_cast<uint8_t>(source) >
+                    static_cast<uint8_t>(BootSource::Golden) ||
                 path_length >= kBootPathLength ||
-                length != 6 + path_length) {
+                length != expected_length ||
+                (source == BootSource::Sd && path_length == 0) ||
+                (source != BootSource::Sd && path_length != 0)) {
                 last_error = kErrorBadSelection;
                 break;
             }
             char path[kBootPathLength]{};
-            std::memcpy(path, request + kHeaderSize + 6, path_length);
-            if (begin_catalog_sd_read(context, path)) {
+            std::memcpy(path, path_bytes, path_length);
+            bool opened = false;
+            if (source == BootSource::Sd) {
+                opened = begin_catalog_sd_read(context, path);
+            } else if (source == BootSource::Flash) {
+                opened = begin_catalog_flash_read(context);
+            } else {
+                opened = begin_catalog_golden_read(context);
+            }
+            if (opened) {
                 write_le32(command_response, nonce);
                 command_response[4] = context;
                 write_le32(command_response + 5, sd_read_size);
@@ -1773,7 +1894,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             const uint32_t offset = read_le32(request + kHeaderSize + 4);
             const uint8_t count = request[kHeaderSize + 8];
             write_le32(command_response, nonce);
-            read_catalog_sd_data(offset, count, &response_length);
+            read_catalog_data(offset, count, &response_length);
         }
         break;
     case kCommandReadSdEnd:
@@ -1781,7 +1902,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             last_error = kErrorLength;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
-            finish_catalog_sd_read(nonce, &response_length);
+            finish_catalog_read(nonce, &response_length);
         }
         break;
     default:
@@ -1838,12 +1959,14 @@ void supervisor_service_init(bool sd_mounted, uint8_t active_context)
     pio_sm_set_consecutive_pindirs(service_pio, service_sm, kMisoPin, 1, true);
     pio_sm_set_consecutive_pindirs(service_pio, service_sm, kCsPin, 3, false);
     pio_sm_init(service_pio, service_sm, service_offset, &config);
-    pio_sm_set_enabled(service_pio, service_sm, true);
 
     last_error = kErrorNone;
     last_command_valid = false;
     copy_source_open = false;
-    sd_read_source_open = false;
+    catalog_read_source = CatalogReadSource::None;
+    memory_read_source = nullptr;
+    catalog_read_crc_expected = false;
+    catalog_read_expected_crc = 0;
     sd_read_cache_valid = false;
     copy_state = kCopyIdle;
     copy_error = kErrorNone;

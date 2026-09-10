@@ -1,9 +1,10 @@
-# K2 FPGA Manager
+# K2 Core Manager
 
-`k2coremgr.pgz` is the interactive K2 FPGA Manager. It obtains the image
+`k2coremgr.pgz` is the interactive K2 Core Manager. It obtains the image
 catalog directly from the RP2040, including files on the manager's
 configuration SD card, the replaceable flash slot, and the embedded recovery
-image when browsing context 1. Contexts 2 through 4 have no embedded core.
+image when browsing context 1 or 4. Both contexts expose the same immutable
+payload; contexts 2 and 3 have no embedded core.
 The manager marks the persistent selection with `*` and the source that
 actually booted with `+`; `>` is the movable cursor.
 
@@ -14,7 +15,7 @@ make -C k2 core-manager
 just run-k2-core-manager
 ```
 
-## K2 FPGA Manager controls
+## K2 Core Manager controls
 
 The manager starts in the RP2040 core catalog for the currently running
 context. `Tab` switches between that catalog and a browser for the K2's local
@@ -32,10 +33,11 @@ Keys available in both views:
 | `F1` | Show the keyboard help screen |
 | `F2` | Show the RP2040 boot diagnostics |
 | `F3` | Copy the selected gzip core to the displayed context's flash slot |
-| `F5` | Copy the selected image from the current SD card to the other SD card |
+| `F5` | Local view: copy to RP2040 SD. Catalog: copy SD, flash, or golden image to K2 SD |
 | `F8` | Restart the RP2040 and repeat FPGA loading |
 | `R` | Rescan the core catalog or reread the local directory |
 | `Q` | Restart the K2 |
+| `RUN/STOP` | Close Help or Diagnostics; cancel the read-only image-validation pass |
 
 RP2040 core catalog controls:
 
@@ -62,13 +64,22 @@ the gzip header page last. While copying, the area below the catalog shows
 separate flash-erase, image-write, and metadata-finalization stages, a
 percentage bar, and confirmed KiB counts.
 
-Catalog-view `F5` works with visible manager-SD `.bin` and `.gz` entries. It
-copies the selected image into the directory last viewed in the local K2 SD
-browser (the filesystem root before that browser has been used). The RP2040
-accepts only an exact entry from a freshly rebuilt context catalog. The K2
-writes a hidden `.<name>.part` file, checks the complete byte count and CRC-32
-against the RP2040, closes it, and then replaces the final local filename. A
-progress bar reports bytes successfully written to the K2 SD.
+Catalog-view `F5` works with visible manager-SD `.bin`/`.gz` entries, the
+context's replaceable `FLASH` image, and `GOLDEN` in contexts that provide it.
+It copies the selected image into the directory last viewed in the local K2 SD
+browser (the filesystem root before that browser has been used). SD entries
+must still match an exact entry from a freshly rebuilt context catalog. Flash
+and golden images are streamed directly from RP2040 flash. The K2 writes a
+hidden `.<name>.part` file, checks the complete byte count and CRC-32 against
+the RP2040, closes it, and reopens it before publication. If the destination
+already exists, it is retained as a hidden `.<name>.bak` rollback copy until
+the staged file has been renamed in the selected directory. A publication
+failure restores that copy when possible instead of deliberately deleting the
+existing file first. Flash readback additionally has to match its stored
+programming CRC. A progress bar reports bytes successfully written to the K2
+SD and shows the intended local path. Before reporting success, the manager
+reopens that complete path to verify that it was published in the selected
+directory.
 
 The one-shot `Enter` path is held only in RP2040 RAM. It does not update the
 metadata journal, so a later power cycle or reset still uses the
@@ -76,7 +87,7 @@ entry marked `*`. `F7` updates that marker without disturbing the running
 core. `S` updates the marker and then launches the selected core in one go.
 
 Delete is restricted to entries on SD. The confirmation dialog shows the pathname
-and requires `Y` to confirm the action. The RP2040 rebuilds the
+and requires `Y` to confirm the action; `RUN/STOP` cancels it. The RP2040 rebuilds the
 catalog immediately before deletion and accepts only an exact, visible `.bin`
 or `.gz` entry in the displayed `CNTXn` directory. Deleting the currently
 running image does not stop the already-configured FPGA, but it will not be

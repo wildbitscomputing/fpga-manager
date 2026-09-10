@@ -2,7 +2,11 @@
 
 ; SPI mode 0 slave. The CPU/DMA supplies one 32-bit FIFO word per byte.
 ; GPIO 0 is MISO, GPIO 1 is CSn, GPIO 2 is SCLK, and GPIO 3 is MOSI.
+; Always observe CSn inactive before accepting a frame. If the state machine is
+; rearmed during a retransmission, this discards the remainder of that frame
+; instead of treating its middle as the start of a new 256-byte transaction.
 .wrap_target
+    wait 1 gpio 1
     wait 0 gpio 1
 bit_loop:
     out pins, 1

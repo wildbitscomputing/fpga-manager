@@ -1,4 +1,4 @@
-The K2 FPGA Manager chooser interaction, display layout, key codes, and text
+The K2 Core Manager chooser interaction, display layout, key codes, and text
 palette were adapted from the pexec project.
 
 MIT License

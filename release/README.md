@@ -6,11 +6,12 @@ It consists of two cooperating programs:
 | Component | Purpose |
 | --- | --- |
 | RP2040 supervisor firmware | Loads the FPGA at startup, maintains the core catalog and saved boot selections, programs replaceable flash, and records fallback diagnostics. |
-| `k2coremgr.pgz` | Provides the on-machine interface for browsing, copying, programming, selecting, and starting FPGA cores. |
+| `k2coremgr.pgz` | K2 Core Manager application for browsing, copying, programming, selecting, and starting FPGA cores. |
 
 The supervisor can use cores on its own SD card, one replaceable flash slot per
-context, and the embedded context-1 recovery core. The K2 utility also sees the
-computer's normal SD card and can copy images in either direction.
+context, and an embedded recovery core shared by contexts 1 and 4. The K2
+utility also sees the computer's normal SD card and can copy images in either
+direction.
 
 ## What is a context?
 
@@ -85,7 +86,7 @@ interface.
 | `K2-FPGA-MANAGER.pdf` | This installation and operating guide. |
 | `fpga_mgr_B0C.uf2` / `.elf` | Supervisor firmware for a Wildbits or purple RevB0C board. |
 | `fpga_mgr_B3B.uf2` / `.elf` | Supervisor firmware for a black RevB3B board. |
-| `k2coremgr.pgz` | Interactive K2-side manager. |
+| `k2coremgr.pgz` | Interactive K2 Core Manager application. |
 | `LICENSE` | Project license. |
 
 ## Choose the correct firmware
@@ -99,8 +100,9 @@ The two FPGA interfaces are not electrically interchangeable.
 | Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
 
 Both variants contain the same supervisor software and the matching K2 FPGA
-02020104 2x core as the context-1 recovery environment. Installing the firmware
-does not overwrite the four replaceable FPGA flash slots.
+02020105 2x core as the recovery environment for contexts 1 and 4. Installing
+the firmware does not overwrite the four replaceable FPGA flash slots. The
+recovery payload is stored only once in the RP2040 firmware.
 
 Do not install firmware intended for the other board revision. The RP2040 will
 still start, but its embedded recovery core will not produce working video.
@@ -136,7 +138,7 @@ or:
 openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" -c "program fpga_mgr_B3B.elf verify reset exit"
 ```
 
-## Install and start the K2 utility
+## Install and start the K2 Core Manager
 
 Copy `k2coremgr.pgz` to the K2's normal SD card and launch it as a PGZ program:
 
@@ -145,8 +147,8 @@ Copy `k2coremgr.pgz` to the K2's normal SD card and launch it as a PGZ program:
 ```
 
 The running FPGA core must implement the RP2040 supervisor mailbox. The bundled
-context-1 recovery core does. If the current core does not, the utility reports
-that the supervisor is offline; press a key to restart the K2, select context 1,
+recovery core does. If the current core does not, the utility reports that the
+supervisor is offline; press a key to restart the K2, select context 1 or 4,
 and start the manager from the recovery environment.
 
 ## Core storage and selection
@@ -161,7 +163,7 @@ another context.
 | --- | --- |
 | RP2040 manager SD | Core files under `CNTX1` through `CNTX4`. Missing directories are created automatically on a writable FAT16/FAT32 card. |
 | Replaceable flash | One gzip image per context. Flash works without the manager SD card. |
-| Embedded recovery | A board-specific known-good 2x core available only in context 1. It cannot be overwritten by normal core programming. |
+| Embedded recovery | A board-specific known-good 2x core shared by contexts 1 and 4. It cannot be overwritten by normal core programming. |
 | K2 local SD | Programs and core files visible to the 65816. The manager uses it to import images to, or export images from, the RP2040 SD card. |
 
 RP2040-SD cores may be raw `.bin` files or gzip `.gz` files. Replaceable flash
@@ -178,7 +180,7 @@ accepts gzip images only, and the compressed file must fit in its 2 MiB slot.
 | `F1` | Show the built-in help screen. |
 | `F2` | Show the RP2040 boot and fallback log. |
 | `F3` | Program the selected gzip image into the displayed context's replaceable flash slot. |
-| `F5` | Copy the selected image from the current SD-card view to the other SD card. |
+| `F5` | Local view: copy to RP2040 SD. Catalog: copy an SD, flash, or golden image to K2 SD. |
 | `F7` | Save the selected catalog entry as the default without starting it. |
 | `S` | Save the selected catalog entry as the default and start it. |
 | `Delete` / `D` | Catalog: confirm and delete an RP2040-SD image. |
@@ -186,6 +188,7 @@ accepts gzip images only, and the compressed file must fit in its 2 MiB slot.
 | `F8` | Restart the RP2040 and repeat FPGA loading with the saved policy. |
 | `R` | Refresh the current directory or catalog. |
 | `Q` | Restart the K2 through the FPGA host-reset registers. |
+| `RUN/STOP` | Close Help or Diagnostics, or cancel the read-only image-validation pass. |
 
 The catalog marks the cursor with `>`, the persistent default with `*`, and the
 core that actually booted with `+`. The running core can differ from the saved
@@ -219,9 +222,15 @@ be prepared before changing the switches.
 
 ### Copy a core back to the K2 SD card
 
-In the catalog, press `F5` on an RP2040-SD image. The file is copied to the last
-directory visited in the local-SD browser, or to the root directory if that
-browser has not yet been used.
+In the catalog, press `F5` on an RP2040-SD image, the replaceable `FLASH`
+image, or `GOLDEN`. The image is copied to the last directory visited in the
+local-SD browser, or to the root directory if that browser has not yet been
+used. The transfer verifies byte count and CRC-32; flash readback must also
+match the CRC recorded when that slot was programmed. The transfer is written
+and verified under a hidden `.part` name. An existing destination is held as a
+hidden rollback copy during publication rather than being deleted first. The
+progress dialog shows the intended K2-SD path, which is reopened after the
+final rename before the manager reports success.
 
 ### Remove an RP2040-SD core
 
@@ -239,21 +248,24 @@ Each context stores one persistent boot selection:
 - An exact SD selection tries that file first and falls back through mutable
   alternatives if it fails.
 - `FLASH` tries the replaceable slot first and then automatic SD discovery.
-- `GOLDEN`, available only in context 1, starts the embedded 2x recovery core
-  directly. It is the default for a fresh context-1 installation.
+- `GOLDEN`, available in contexts 1 and 4, starts their shared embedded 2x
+  recovery core directly. It is the default for a fresh context-1 installation.
 
-Context 1 adds embedded recovery after failed SD and flash attempts. Contexts 2
-through 4 contain no embedded cores. If one of those contexts
-cannot boot, select context 1 with the physical switches, restart, and use the
-manager to repair the failed context before switching back.
+Contexts 1 and 4 add embedded recovery after failed SD and flash attempts.
+Contexts 2 and 3 contain no embedded core. If one of those contexts cannot
+boot, select context 1 or 4 with the physical switches, restart, and use the
+manager to repair the failed context before switching back. Context 4 retains
+the same recovery image for compatibility with the original K2 context layout;
+the firmware stores only one copy.
 
 The RP2040 SD card is optional. Without it, the supervisor can still boot a
-valid replaceable flash image and context 1 can still reach embedded recovery.
+valid replaceable flash image and contexts 1 and 4 can still reach embedded
+recovery.
 
 ## Forced recovery and diagnostics
 
-To force the immutable recovery image, select context 1 and hold the K2 RESET
-signal while the RP2040 starts. When the system is already running, holding
+To force the immutable recovery image, select context 1 or 4 and hold the K2
+RESET signal while the RP2040 starts. When the system is already running, holding
 RESET for five seconds restarts the RP2040; keep RESET held through that restart
 to request recovery.
 

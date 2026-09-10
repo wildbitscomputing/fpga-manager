@@ -31,7 +31,7 @@ set(CMAKE_CXX_STANDARD 17)
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(fpga_mgr VERSION 1.15 LANGUAGES C CXX ASM)
+project(fpga_mgr VERSION 1.16 LANGUAGES C CXX ASM)
 
 if(PROJECT_VERSION_MAJOR GREATER 255 OR PROJECT_VERSION_MINOR GREATER 255)
     message(FATAL_ERROR "Supervisor protocol version components must fit in one byte")
@@ -45,18 +45,19 @@ configure_file(
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# One context-1 recovery image is linked into each board-specific manager below
-# the mutable 8 MiB slot bank. FPGA bitstreams are not interchangeable between
-# RevB0C and RevB3B, so one CMake build emits both explicitly named variants.
+# One recovery payload is linked into each board-specific manager below the
+# mutable 8 MiB slot bank. It is exposed in contexts 1 and 4 without being
+# duplicated. FPGA bitstreams are not interchangeable between RevB0C and
+# RevB3B, so one CMake build emits both explicitly named variants.
 set(K2_BOARD_REVISIONS B0C B3B)
 
 set(GOLDEN_B0C_CONTEXT1_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B0C/context1.gz)
 set(GOLDEN_B3B_CONTEXT1_DEFAULT ${CMAKE_CURRENT_LIST_DIR}/fpga/B3B/context1.gz)
 
 set(GOLDEN_B0C_CONTEXT1_DEFAULT_LABEL
-    "WildbitsK2_2x_B0C_02020104_20260831.bin.gz")
+    "WildbitsK2_2x_B0C_02020105_20260909.bin.gz")
 set(GOLDEN_B3B_CONTEXT1_DEFAULT_LABEL
-    "WildbitsK2_2x_B3B_02020104_20260831.bin.gz")
+    "WildbitsK2_2x_B3B_02020105_20260909.bin.gz")
 
 foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
     set(GOLDEN_IMAGE_VARIABLE "GOLDEN_${K2_BOARD_REVISION}_CONTEXT1")
@@ -66,13 +67,13 @@ foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
         "${GOLDEN_IMAGE_VARIABLE}_DEFAULT_LABEL")
 
     set(${GOLDEN_IMAGE_VARIABLE} "${${GOLDEN_DEFAULT_VARIABLE}}"
-        CACHE FILEPATH "Rev${K2_BOARD_REVISION} context-1 recovery gzip image")
+        CACHE FILEPATH "Rev${K2_BOARD_REVISION} shared contexts 1/4 recovery gzip image")
     set(${GOLDEN_LABEL_VARIABLE} "" CACHE STRING
-        "Rev${K2_BOARD_REVISION} context-1 recovery display name")
+        "Rev${K2_BOARD_REVISION} shared contexts 1/4 recovery display name")
 
     if(NOT EXISTS "${${GOLDEN_IMAGE_VARIABLE}}")
         message(FATAL_ERROR
-            "Missing Rev${K2_BOARD_REVISION} context-1 recovery image: ${${GOLDEN_IMAGE_VARIABLE}}")
+            "Missing Rev${K2_BOARD_REVISION} shared contexts 1/4 recovery image: ${${GOLDEN_IMAGE_VARIABLE}}")
     endif()
     file(TO_CMAKE_PATH "${${GOLDEN_IMAGE_VARIABLE}}" GOLDEN_IMAGE_PATH)
     set(GOLDEN_CONTEXT1 "${GOLDEN_IMAGE_PATH}")
@@ -92,11 +93,11 @@ foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
     string(LENGTH "${GOLDEN_EMBEDDED_LABEL}" GOLDEN_CONTEXT_LABEL_LENGTH)
     if(GOLDEN_CONTEXT_LABEL_LENGTH GREATER 191)
         message(FATAL_ERROR
-            "Rev${K2_BOARD_REVISION} context-1 recovery display name exceeds 191 characters")
+            "Rev${K2_BOARD_REVISION} shared contexts 1/4 recovery display name exceeds 191 characters")
     endif()
     if(GOLDEN_EMBEDDED_LABEL MATCHES "[\r\n]")
         message(FATAL_ERROR
-            "Rev${K2_BOARD_REVISION} context-1 recovery display name contains a newline")
+            "Rev${K2_BOARD_REVISION} shared contexts 1/4 recovery display name contains a newline")
     endif()
     string(REPLACE "\\" "\\\\" GOLDEN_EMBEDDED_LABEL
            "${GOLDEN_EMBEDDED_LABEL}")
@@ -107,7 +108,7 @@ foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
     file(SIZE "${GOLDEN_IMAGE_PATH}" GOLDEN_IMAGE_SIZE)
     if(GOLDEN_IMAGE_SIZE GREATER 2097152)
         message(FATAL_ERROR
-            "Rev${K2_BOARD_REVISION} context-1 recovery image is ${GOLDEN_IMAGE_SIZE} bytes; maximum is 2 MiB")
+            "Rev${K2_BOARD_REVISION} shared contexts 1/4 recovery image is ${GOLDEN_IMAGE_SIZE} bytes; maximum is 2 MiB")
     endif()
 
     set(GOLDEN_ASSEMBLY

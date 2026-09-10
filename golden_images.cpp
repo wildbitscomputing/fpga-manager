@@ -20,5 +20,7 @@ const GoldenImageInfo golden_context1 = {
 
 const GoldenImageInfo* golden_image_for_context(uint8_t context)
 {
-    return context == kGoldenRecoveryContext ? &golden_context1 : nullptr;
+    // Context 4 retains its historical recovery behavior, but aliases the
+    // context-1 payload so the bitstream is linked only once.
+    return context_has_golden_recovery(context) ? &golden_context1 : nullptr;
 }
