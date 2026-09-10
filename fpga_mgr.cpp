@@ -18,10 +18,13 @@
 #include "boot_log.h"
 #include "fpga_manager_version.h"
 #include "fpga_out.pio.h"
+#include "firmware_trial.h"
+#include "firmware_update_engine.h"
 #include "golden_images.h"
 #include "hardware/clocks.h"
 #include "hw_config.h"
 #include "miniz.h"
+#include "rp2040_firmware_storage.h"
 #include "supervisor_service.h"
 
 // Set to 0 to use legacy GPIO bit-bang path for FPGA programming.
@@ -389,9 +392,36 @@ int main()
 {
     // set_sys_clock_khz(266000, true);
     stdio_init_all();
+    firmware_trial_watchdog_feed();
     boot_log_reset();
     boot_logf("Manager Rev%s firmware %s", K2_BOARD_REVISION,
               FPGA_MANAGER_VERSION_STRING);
+    {
+        Rp2040FirmwareStorage storage;
+        const auto board = static_cast<firmware_update::BoardRevision>(
+            K2_BOARD_ID);
+        const auto journal =
+            firmware_update::read_update_journal(storage, board);
+        if (journal.valid) {
+            switch (static_cast<firmware_update::UpdateResult>(
+                journal.record.result)) {
+                case firmware_update::UpdateResult::Installed:
+                    boot_logf("Last firmware update installed successfully");
+                    break;
+                case firmware_update::UpdateResult::RolledBack:
+                    boot_logf("Last firmware update rolled back");
+                    break;
+                case firmware_update::UpdateResult::Rejected:
+                    boot_logf("Last firmware update was rejected");
+                    break;
+                case firmware_update::UpdateResult::Recovered:
+                    boot_logf("Firmware application recovered from backup");
+                    break;
+                case firmware_update::UpdateResult::None:
+                    break;
+            }
+        }
+    }
     xosc_init(); // #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
     time_init();
 
@@ -399,12 +429,14 @@ int main()
 
     f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
     boot_config_init();
+    firmware_trial_watchdog_feed();
 
     // Holding the active-low system reset for at least 500 ms during manager
     // startup forces recovery. Physical contexts 1 and 4 expose the same
     // embedded image.
     bool force_golden = !gpio_get(FPGA_SYSTEM_RSTn);
     sleep_ms(500);
+    firmware_trial_watchdog_feed();
     force_golden = force_golden && !gpio_get(FPGA_SYSTEM_RSTn);
 
     absolute_time_t start = get_absolute_time();
@@ -428,6 +460,7 @@ int main()
     }
 
     FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
+    firmware_trial_watchdog_feed();
 
     bool sd_mounted = (fr == FR_OK);
     if (sd_mounted) {
@@ -437,6 +470,7 @@ int main()
         boot_logf("Manager SD mount failed: %u", static_cast<unsigned>(fr));
     }
     method = program_selected_context(dip_switches, sd_mounted, force_golden);
+    firmware_trial_watchdog_feed();
 
     if (method == FPGA_METHOD_NONE) {
         panic("No usable FPGA image; select context 1 or 4 for recovery\n");
@@ -456,6 +490,13 @@ int main()
     // Keep clk_sys unchanged so UART baud and other clock-derived peripheral
     // settings remain valid after FPGA programming.
     supervisor_service_init(sd_mounted, dip_switches);
+    const bool was_trial = firmware_trial_active();
+    if (!firmware_trial_confirm()) {
+        printf("Trial firmware confirmation failed; rollback watchdog remains active\n");
+        boot_logf("Trial confirmation failed; rollback armed");
+    } else if (was_trial) {
+        boot_logf("Firmware startup confirmed");
+    }
     start_reset_hold_monitor();
 
     bool reconfigure_armed = false;
@@ -1283,6 +1324,7 @@ bool f256k2_prg_block_fpga(const uint8_t* ptr, unsigned int len)
         sio_hw->gpio_set = FPGA_CCLK_MASK;     // Write strobe high
     }
 #endif
+    firmware_trial_watchdog_feed();
     if (!gpio_get(FPGA_CONFIG_INITn)) {
         printf("FPGA configuration failed: INITn went low while streaming\n");
         boot_logf("Reject: FPGA INIT_B low while streaming");

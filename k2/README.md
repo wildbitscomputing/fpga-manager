@@ -5,8 +5,9 @@ catalog directly from the RP2040, including files on the manager's
 configuration SD card, the replaceable flash slot, and the embedded recovery
 image when browsing context 1 or 4. Both contexts expose the same immutable
 payload; contexts 2 and 3 have no embedded core.
-The manager marks the persistent selection with `*` and the source that
-actually booted with `+`; `>` is the movable cursor.
+The manager marks the persistent selection with a green check and the source
+that actually booted with an orange dot; the amber triangle is the movable
+cursor.
 
 Build and launch it from the development host with:
 
@@ -35,6 +36,7 @@ Keys available in both views:
 | `F3` | Copy the selected gzip core to the displayed context's flash slot |
 | `F5` | Local view: copy to RP2040 SD. Catalog: copy SD, flash, or golden image to K2 SD |
 | `F8` | Restart the RP2040 and repeat FPGA loading |
+| `U` | In Local SD view, stage or apply a highlighted `.k2fw` FPGA Manager update |
 | `R` | Rescan the core catalog or reread the local directory |
 | `Q` | Restart the K2 |
 | `RUN/STOP` | Close Help or Diagnostics; cancel the read-only image-validation pass |
@@ -83,8 +85,9 @@ directory.
 
 The one-shot `Enter` path is held only in RP2040 RAM. It does not update the
 metadata journal, so a later power cycle or reset still uses the
-entry marked `*`. `F7` updates that marker without disturbing the running
-core. `S` updates the marker and then launches the selected core in one go.
+entry marked with the green check. `F7` updates that marker without disturbing
+the running core. `S` updates the marker and then launches the selected core in
+one go.
 
 Delete is restricted to entries on SD. The confirmation dialog shows the pathname
 and requires `Y` to confirm the action; `RUN/STOP` cancels it. The RP2040 rebuilds the
@@ -102,6 +105,7 @@ Local K2 SD browser controls:
 | `Left` / `Right` | Move backward or forward by 10 entries |
 | `Enter` on a directory | Open the highlighted directory |
 | `F5` on `.bin` / `.gz` | Copy the highlighted image into the displayed context directory on the RP2040 manager SD card |
+| `U` on `.k2fw` | Validate and stage a board-specific FPGA Manager firmware update |
 | `Backspace` or `Delete` | Return to the parent directory |
 
 A local-view `F5` copy does not program flash or boot the image. It copies the file
@@ -127,13 +131,40 @@ During either operation, the validation pass reports bytes scanned. The write
 pass shows a percentage and the byte count acknowledged by the RP2040 rather
 than merely the amount read from the local file.
 
+### Updating the FPGA Manager firmware
+
+The firmware update path is independent of the optional RP2040 SD card:
+
+1. Put the board-specific `.k2fw` package on the K2/MicroKernel SD card.
+2. Open the Local SD view, highlight the package, and press `U`.
+3. The Core Manager scans the file, asks the RP2040 to validate its manifest,
+   prepares the fixed staging slot, and streams the payload with acknowledged
+   offsets. Progress is shown separately for staging erase and reception.
+4. Once the payload hash, flash readback, complete image, and update journal
+   have been verified, press `Y` to restart the RP2040 and install it.
+
+`RUN/STOP` can cancel the initial read-only file scan. At the final prompt it
+leaves the verified package staged; pressing `U` again returns directly to the
+install prompt. The committed package will be installed on the next RP2040
+restart even if that restart is initiated another way. Once the RP2040
+restarts, installation cannot be cancelled.
+The first-stage loader preserves the old application as rollback, starts the
+candidate under an eight-second watchdog, and restores the old version if the
+candidate cannot program an FPGA and initialize the supervisor mailbox.
+
+Wrong-board, malformed, oversized, incompatible-loader, corrupted, and
+downgrade packages are rejected. A power loss before the final pending journal
+commit leaves the current firmware selected. The first update-capable factory
+UF2/ELF must still be installed once through BOOTSEL or SWD; later releases can
+use `.k2fw`.
+
 The catalog marker columns mean:
 
 | Marker | Meaning |
 | --- | --- |
-| `>` | Movable cursor/currently highlighted entry. |
-| `*` | Persistent boot selection for the displayed context. |
-| `+` | Image that actually booted. This can differ from `*` after fallback. |
+| amber triangle | Movable cursor/currently highlighted entry. |
+| green check | Persistent boot selection for the displayed context. |
+| orange dot | Image that actually booted. This can differ from the saved default after fallback. |
 
 ### Boot diagnostics
 

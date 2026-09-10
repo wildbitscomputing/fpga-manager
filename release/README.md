@@ -86,6 +86,8 @@ interface.
 | `K2-FPGA-MANAGER.pdf` | This installation and operating guide. |
 | `fpga_mgr_B0C.uf2` / `.elf` | Supervisor firmware for a Wildbits or purple RevB0C board. |
 | `fpga_mgr_B3B.uf2` / `.elf` | Supervisor firmware for a black RevB3B board. |
+| `fpga_mgr_B0C_<version>.k2fw` | In-system FPGA Manager update for RevB0C. |
+| `fpga_mgr_B3B_<version>.k2fw` | In-system FPGA Manager update for RevB3B. |
 | `k2coremgr.pgz` | Interactive K2 Core Manager application. |
 | `LICENSE` | Project license. |
 
@@ -106,6 +108,13 @@ recovery payload is stored only once in the RP2040 firmware.
 
 Do not install firmware intended for the other board revision. The RP2040 will
 still start, but its embedded recovery core will not produce working video.
+
+The UF2 and ELF in this release include the protected first-stage loader. A K2
+running older firmware must install the matching factory image once through
+BOOTSEL or SWD. The `.k2fw` files update only the normal application and cannot
+replace or damage that loader. Factory flashing also resets the dedicated
+firmware-update journal so it is a reliable recovery operation, while leaving
+core boot selections and the four replaceable FPGA slots alone.
 
 ## Install the supervisor firmware
 
@@ -186,13 +195,14 @@ accepts gzip images only, and the compressed file must fit in its 2 MiB slot.
 | `Delete` / `D` | Catalog: confirm and delete an RP2040-SD image. |
 | `Backspace` / `Delete` | Local SD: return to the parent directory. |
 | `F8` | Restart the RP2040 and repeat FPGA loading with the saved policy. |
+| `U` | Local SD: stage or apply the highlighted `.k2fw` FPGA Manager update. |
 | `R` | Refresh the current directory or catalog. |
 | `Q` | Restart the K2 through the FPGA host-reset registers. |
 | `RUN/STOP` | Close Help or Diagnostics, or cancel the read-only image-validation pass. |
 
-The catalog marks the cursor with `>`, the persistent default with `*`, and the
-core that actually booted with `+`. The running core can differ from the saved
-default when fallback was necessary.
+The catalog marks the cursor with an amber triangle, the persistent default
+with a green check, and the core that actually booted with an orange dot. The
+running core can differ from the saved default when fallback was necessary.
 
 ## Common workflows
 
@@ -238,6 +248,24 @@ Highlight an SD entry in the catalog and press `Delete` or `D`. The manager asks
 for confirmation and accepts `Y` only. Deleting a running image does not stop
 the configured FPGA, but that file will no longer be available at the next
 boot. Flash and embedded-recovery entries cannot be deleted this way.
+
+### Update the FPGA Manager in-system
+
+After the one-time loader migration, copy the `.k2fw` matching the physical
+board revision to the K2 local SD card. Open it in the local-SD browser and
+press `U`. The manager verifies the file shape, streams it into a fixed staging
+slot, and shows erase and receive progress. The RP2040 checks the board ID,
+loader compatibility, manifest CRC, flash readback, vectors, and payload
+SHA-256 before committing the pending update.
+
+Press `Y` at the final prompt to restart the RP2040 and install it. `RUN/STOP`
+leaves the verified candidate staged; press `U` later to return to the prompt.
+Because the pending update is already committed, any intervening RP2040
+restart will install it.
+The old application is preserved as rollback, and an eight-second startup
+watchdog automatically restores it if the candidate cannot load an FPGA and
+bring up the supervisor mailbox. The optional RP2040 SD card is not used by
+this update path.
 
 ## Boot policy and fallback
 

@@ -108,6 +108,14 @@ def main() -> None:
         (build_dir / "fpga_mgr_B0C.elf", "fpga_mgr_B0C.elf"),
         (build_dir / "fpga_mgr_B3B.uf2", "fpga_mgr_B3B.uf2"),
         (build_dir / "fpga_mgr_B3B.elf", "fpga_mgr_B3B.elf"),
+        (
+            build_dir / f"fpga_mgr_B0C_{version}.k2fw",
+            f"fpga_mgr_B0C_{version}.k2fw",
+        ),
+        (
+            build_dir / f"fpga_mgr_B3B_{version}.k2fw",
+            f"fpga_mgr_B3B_{version}.k2fw",
+        ),
         (ROOT / "k2" / "k2coremgr.pgz", "k2coremgr.pgz"),
         (ROOT / "LICENSE", "LICENSE"),
     )

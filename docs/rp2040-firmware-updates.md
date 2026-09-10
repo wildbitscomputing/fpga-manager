@@ -1,8 +1,13 @@
 # Failure-safe RP2040 firmware updates
 
-Status: proposed implementation plan. This describes updates to the RP2040
-FPGA Manager firmware from the 65816 Core Manager. It is separate from FPGA
-core installation.
+Status: implementation in progress. The flash layout, package format,
+host-side package tooling, relocated application build, validating first-stage
+loader, factory images, alternating update journal, and restartable install and
+rollback state machine are implemented and host-validated. Hardware validation,
+on-device fault injection, and end-to-end hardware validation remain. The
+trial watchdog, RP2040 mailbox transfer path, and Core Manager `.k2fw` workflow
+are implemented; the staging receiver is host-tested with reset injection.
+This work is separate from FPGA core installation.
 
 ## Goals
 
@@ -40,7 +45,7 @@ The loader is normally immutable: in-system packages never contain or address
 it. Updating the loader itself remains an explicit BOOTSEL or SWD operation.
 Keeping this component small and stable is part of the recovery guarantee.
 
-## Proposed flash layout
+## Firmware flash layout
 
 The board has 16 MiB of RP2040 QSPI flash. The upper 8 MiB remains unchanged:
 four 2 MiB replaceable FPGA-image slots at offsets `0x800000`, `0xA00000`,
@@ -54,9 +59,10 @@ The lower 8 MiB becomes:
 | `0x010000-0x27FFFF` | 2,496 KiB | Active application slot |
 | `0x280000-0x4EFFFF` | 2,496 KiB | Last-known-good rollback slot |
 | `0x4F0000-0x75FFFF` | 2,496 KiB | Incoming update staging slot |
-| `0x760000-0x7FBFFF` | 624 KiB | Reserved; kept erased |
-| `0x7FC000-0x7FCFFF` | 4 KiB | Update journal A |
-| `0x7FD000-0x7FDFFF` | 4 KiB | Update journal B |
+| `0x760000-0x7DFFFF` | 512 KiB | Reserved; kept erased |
+| `0x7E0000-0x7E0FFF` | 4 KiB | Update journal A |
+| `0x7E1000-0x7E1FFF` | 4 KiB | Update journal B |
+| `0x7E2000-0x7FDFFF` | 112 KiB | Reserved; kept erased |
 | `0x7FE000-0x7FEFFF` | 4 KiB | Existing boot metadata A |
 | `0x7FF000-0x7FFFFF` | 4 KiB | Existing boot metadata B |
 
@@ -169,6 +175,12 @@ The update journal uses alternating erase sectors, monotonically increasing
 sequence numbers, record CRCs, and readback verification, following the same
 principle as the existing boot metadata.
 
+Each journal sector contains one 256-byte record followed by erased bytes. A
+record identifies its board revision, state, sequence number, candidate build
+identifier, candidate payload SHA-256, and durable last result. Its CRC-32
+covers all bytes before the CRC field. The candidate identity prevents a stale
+or different active or staging image from advancing or confirming an update.
+
 The loader recognizes these states:
 
 | State | Meaning | Loader action |
@@ -192,12 +204,14 @@ stateDiagram-v2
     ROLLBACK --> CONFIRMED: old active restored and verified
 ```
 
-Copying uses a 4 KiB RAM buffer. The source sector is read before the
-destination sector is erased; each programmed page and final sector are read
-back. The destination payload is copied first and its manifest sector is
-committed last, so a partial active or rollback copy is not independently
-valid. If power is lost, the last durable journal state causes the entire
-current copy phase to restart. Repeating a phase is intentional and safe.
+Copying uses one aligned 256-byte RAM page buffer. The source and destination
+are always different slots. Each destination sector is erased and checked,
+then each payload page is read from the source before it is programmed and
+read back. The complete destination payload hash is verified before the first
+manifest page is committed and the complete image is validated. A partial
+active or rollback copy is therefore not independently valid. If power is
+lost, the last durable journal state causes the entire current copy phase to
+restart. Repeating a phase is intentional and safe.
 
 If both update-journal records are invalid, the loader never promotes staging
 automatically. It tries a valid active image first, then restores a valid
@@ -208,9 +222,10 @@ into arbitrary flash.
 
 ### Trial boot and automatic rollback
 
-Immediately before starting a candidate, the loader commits `TRIAL` and arms
-the watchdog. The application must service the watchdog from early startup,
-during SD/FPGA programming, and through supervisor initialization.
+Immediately before starting a candidate, the loader commits `TRIAL`. An early
+Pico SDK runtime hook in the candidate arms the watchdog immediately after
+clock initialization. The application then services it during SD/FPGA
+programming and through supervisor initialization.
 
 The candidate confirms itself only after:
 
@@ -227,8 +242,9 @@ because the build identifier must match the journal.
 
 ## Mailbox protocol additions
 
-Exact wire layouts belong in the authoritative FPGA mailbox specification.
-The implementation needs these logical operations:
+The commands use the existing protocol-v1 256-byte frame, pipelined response,
+duplicate suppression, and four-byte request nonce. Multi-byte values are
+little-endian. Command payloads remain limited to 240 bytes.
 
 | Operation | Purpose |
 | --- | --- |
@@ -238,6 +254,56 @@ The implementation needs these logical operations:
 | `FW_END` | Verify payload, write the staging manifest last, and commit `PENDING` |
 | `FW_ABORT` | Abandon receiving state; active firmware is unchanged |
 | `FW_APPLY` | Acknowledge, then restart the RP2040 into the loader |
+
+The assigned command bytes are:
+
+| Command | Byte | Request |
+| --- | ---: | --- |
+| `FW_INFO` | `$19` | `nonce:u32` |
+| `FW_BEGIN` | `$1A` | `nonce:u32, package_size:u32` |
+| `FW_DATA` | `$1B` | `nonce:u32, offset:u32, data:1..232 bytes` |
+| `FW_END` | `$1C` | `nonce:u32` |
+| `FW_ABORT` | `$1D` | `nonce:u32` |
+| `FW_APPLY` | `$1E` | `nonce:u32` |
+
+Every valid firmware-command response returns this 35-byte status payload:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | echoed nonce |
+| 4 | 1 | board ID (`1` B0C, `2` B3B) |
+| 5 | 2 | loader ABI |
+| 7 | 1 | running firmware major version |
+| 8 | 1 | running firmware minor version |
+| 9 | 1 | journal-valid flag |
+| 10 | 1 | durable journal state, or zero |
+| 11 | 1 | receiver state |
+| 12 | 1 | receiver error |
+| 13 | 1 | manifest/image validation result |
+| 14 | 4 | next sequential package offset |
+| 18 | 4 | phase progress |
+| 22 | 4 | phase total |
+| 26 | 4 | declared package size |
+| 30 | 4 | manifest payload size, once known |
+| 34 | 1 | durable last update result, or zero |
+
+Receiver states are `0 IDLE`, `1 MANIFEST`, `2 ERASING`, `3 PAYLOAD`,
+`4 READY`, and `5 FAILED`. During `ERASING`, progress describes bytes erased;
+during the other transfer phases it describes package bytes accepted.
+Last-result values are `0 NONE`, `1 INSTALLED`, `2 ROLLED_BACK`, `3 REJECTED`,
+and `4 RECOVERED`.
+`FW_DATA` offsets are strictly sequential. A client that loses synchronization
+must use `FW_INFO` and continue only at the returned next offset. The first
+4096 bytes are the manifest sector; a data command may not cross its boundary.
+
+Remote error `$30` means that the firmware operation was rejected; when a
+status response is available, its receiver error gives the reason. Receiver
+errors are `1 BAD_STATE`, `2 BAD_SIZE`, `3 BAD_OFFSET`, `4 BUSY`,
+`5 BAD_MANIFEST`, `6 STORAGE`, `7 VERIFY`, `8 BAD_HASH`, `9 JOURNAL`, and
+`10 DOWNGRADE`. Framing errors continue to use the
+existing common mailbox error values. Supervisor status bit 5 indicates an
+active firmware receive operation and bit 6 indicates a verified update ready
+to apply.
 
 Commands remain nonce-protected and bounded by the existing 240-byte mailbox
 payload. Flash erasure, hash verification, and page programming must be
@@ -250,24 +316,20 @@ staging region internally and rejects writes outside the declared payload.
 ## Core Manager user interface
 
 The local K2 SD browser recognizes `.k2fw` as a firmware package, distinct from
-`.bin` and `.gz` FPGA cores. A proposed `F6 Update manager` action is available
-only on such a file. It shows a confirmation dialog with:
+`.bin` and `.gz` FPGA cores. Pressing `U` scans the highlighted package, begins
+staging, and shows separate erase and receive progress. The RP2040 performs the
+authoritative board, loader-ABI, manifest, vector, payload-hash, and flash
+readback checks. Downgrades are rejected; reinstalling the same version is
+allowed for recovery.
 
-- detected board and package target;
-- current and candidate firmware versions;
-- whether this is an upgrade or an explicitly requested downgrade;
-- the fact that the RP2040 will restart while the FPGA remains configured.
-
-The update has separate progress stages: checking package, erasing staging,
-uploading, verifying, backing up, installing, trial boot,
-and confirmed/rolled back. Staging can be cancelled; installation after restart
-cannot be cancelled safely and must be allowed to finish.
-
-After `FW_APPLY`, the Core Manager tolerates the mailbox being unavailable for
-the installation interval, polls for its return, then reads `FW_INFO`. The
-result is explicit: updated and confirmed, rejected before installation, or
-rolled back to the previous version. The result is also included in the F2
-diagnostics view.
+After the pending journal commit, a confirmation dialog explains that the
+RP2040 will restart and the current core will reload. `RUN/STOP` leaves the
+verified update staged, and another `U` returns to that prompt without copying
+the file again. Because `PENDING` is already durable, any RP2040 restart will
+also begin installation. Installation after `FW_APPLY` or another restart
+cannot be cancelled safely and must be allowed to finish. The loader and
+candidate then complete the backup, installation, trial-watchdog, and
+confirmation phases without relying on the 65816 program remaining active.
 
 The first implementation reads `.k2fw` from the K2 SD card and therefore does
 not depend on the optional RP2040 SD card. Staging directly from an RP2040-SD
@@ -292,7 +354,9 @@ file can be added later without changing the flash transaction.
 | Active and rollback are both invalid | Use valid staging only as recovery, otherwise enter USB BOOTSEL |
 
 The first-stage loader and update journal must never share an erase sector with
-an application image or existing boot metadata.
+an application image or existing boot metadata. The journal also occupies its
+own 64 KiB physical erase block so an OpenOCD/SWD factory installation cannot
+erase the adjacent boot-metadata sectors on this flash device.
 
 ## Build and release changes
 
@@ -312,8 +376,11 @@ hardware.
 The first update-capable release is a migration release. It must be installed
 once through BOOTSEL or SWD because existing firmware has no protected loader
 and occupies offset zero. That installation should write only the loader and
-active application ranges, preserving the FPGA slots and boot metadata. Future
-normal releases can then be installed from `.k2fw` inside the Core Manager.
+active application ranges plus a clean `CONFIRMED` update journal, preserving
+the FPGA slots and separate boot-selection metadata. Initializing both journal
+sectors is important: a factory/recovery flash performed during an interrupted
+trial must not honor stale `PENDING` or `TRIAL` state afterward. Future normal
+releases can then be installed from `.k2fw` inside the Core Manager.
 
 ## Implementation sequence
 
@@ -328,8 +395,8 @@ normal releases can then be installed from `.k2fw` inside the Core Manager.
 6. Add `.k2fw` generation and host-side inspection tools, retaining reserved
    fields for a future signature scheme.
 7. Add incremental staging and status commands to the FPGA Manager mailbox.
-8. Add `.k2fw`, confirmation, progress, restart, and result handling to the K2
-   Core Manager.
+8. Add `.k2fw`, confirmation, progress, and restart handling to the K2 Core
+   Manager.
 9. Add trial-watchdog servicing and confirmation to normal manager startup.
 10. Test the migration UF2/ELF and in-system updates on both B0C and B3B boards.
 11. Update release documentation only after the destructive fault-injection

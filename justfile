@@ -15,6 +15,9 @@ set default-list
 @build-b3b: (build-target "fpga_mgr_B3B")
 @build-with-fpga-load: (build-target "fpga_mgr_with_fpga_uf2")
 
+@test-firmware-packages:
+    python3 -m unittest discover -s tests -p 'test_*.py' -v
+
 @build-k2-uploader:
     make -C k2
 

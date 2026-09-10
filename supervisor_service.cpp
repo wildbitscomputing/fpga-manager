@@ -7,6 +7,8 @@
 #include "boot_log.h"
 #include "ff.h"
 #include "fpga_manager_version.h"
+#include "firmware_staging.h"
+#include "firmware_update_layout.h"
 #include "golden_images.h"
 #include "hardware/adc.h"
 #include "hardware/dma.h"
@@ -15,7 +17,12 @@
 #include "hardware/sync.h"
 #include "miniz.h"
 #include "pico/stdlib.h"
+#include "rp2040_firmware_storage.h"
 #include "supervisor_spi.pio.h"
+
+#ifndef K2_BOARD_ID
+#error "K2_BOARD_ID must identify the board-specific firmware image"
+#endif
 
 namespace {
 
@@ -32,6 +39,7 @@ constexpr uint kMisoPin = 0;
 constexpr uint kCsPin = 1;
 constexpr uint kClockPin = 2;
 constexpr uint kMosiPin = 3;
+constexpr uint32_t kFrameTimeoutMs = 100;
 
 constexpr uint8_t kCommandPoll = 0x00;
 constexpr uint8_t kCommandPing = 0x01;
@@ -58,6 +66,12 @@ constexpr uint8_t kCommandRestartSupervisor = 0x15;
 constexpr uint8_t kCommandReadSdBegin = 0x16;
 constexpr uint8_t kCommandReadSdData = 0x17;
 constexpr uint8_t kCommandReadSdEnd = 0x18;
+constexpr uint8_t kCommandFirmwareInfo = 0x19;
+constexpr uint8_t kCommandFirmwareBegin = 0x1a;
+constexpr uint8_t kCommandFirmwareData = 0x1b;
+constexpr uint8_t kCommandFirmwareEnd = 0x1c;
+constexpr uint8_t kCommandFirmwareAbort = 0x1d;
+constexpr uint8_t kCommandFirmwareApply = 0x1e;
 
 constexpr uint8_t kTargetSdRaw = 0;
 constexpr uint8_t kTargetFlashGzip = 2;
@@ -111,6 +125,7 @@ enum Error : uint8_t {
     kErrorNoRead = 0x26,
     kErrorReadPosition = 0x27,
     kErrorContextMismatch = 0x28,
+    kErrorFirmwareUpdate = 0x30,
 };
 
 enum ImageFormat : uint8_t {
@@ -212,6 +227,26 @@ uint8_t last_command_sequence = 0;
 uint8_t last_command = kCommandPoll;
 uint16_t last_command_length = 0;
 uint8_t last_command_payload[kMaxPayload];
+Rp2040FirmwareStorage firmware_storage;
+firmware_update::FirmwareStagingReceiver firmware_receiver;
+
+constexpr firmware_update::BoardRevision firmware_board_revision()
+{
+    static_assert(
+        K2_BOARD_ID ==
+                static_cast<int>(firmware_update::BoardRevision::B0C) ||
+            K2_BOARD_ID ==
+                static_cast<int>(firmware_update::BoardRevision::B3B));
+    return static_cast<firmware_update::BoardRevision>(K2_BOARD_ID);
+}
+
+bool firmware_receive_active()
+{
+    const auto state = firmware_receiver.status().state;
+    return state == firmware_update::FirmwareReceiveState::Manifest ||
+           state == firmware_update::FirmwareReceiveState::Erasing ||
+           state == firmware_update::FirmwareReceiveState::Payload;
+}
 
 uint16_t read_le16(const uint8_t* p)
 {
@@ -512,6 +547,12 @@ uint8_t status_byte()
     if (catalog_read_source != CatalogReadSource::None) {
         status |= 0x10;
     }
+    if (firmware_receive_active()) {
+        status |= 0x20;
+    }
+    if (firmware_receiver.ready_to_apply()) {
+        status |= 0x40;
+    }
     if (last_error != kErrorNone) {
         status |= 0x80;
     }
@@ -541,9 +582,22 @@ void reset_transport()
     pio_sm_set_enabled(service_pio, service_sm, false);
     pio_sm_clear_fifos(service_pio, service_sm);
     pio_sm_restart(service_pio, service_sm);
+    // pio_sm_restart() resets the shifters and stalled-instruction state, but
+    // deliberately leaves the program counter untouched.  A timed-out frame
+    // can stop anywhere in bit_loop, so explicitly return to the program's
+    // CSn-high/CSn-low frame-boundary waits before re-enabling the SM.
+    pio_sm_exec(service_pio, service_sm, pio_encode_jmp(service_offset));
 }
 
-void transfer_frame()
+void abort_transport_frame()
+{
+    pio_sm_set_enabled(service_pio, service_sm, false);
+    dma_channel_abort(tx_dma);
+    dma_channel_abort(rx_dma);
+    reset_transport();
+}
+
+bool transfer_frame()
 {
     for (size_t i = 0; i < kFrameSize; ++i) {
         tx_words[i] = static_cast<uint32_t>(response[i]) << 24;
@@ -572,12 +626,27 @@ void transfer_frame()
     // the TX DMA has preloaded at least the first byte while the PIO is stopped,
     // then let the PIO wait for a complete CSn high-to-low frame boundary.
     dma_start_channel_mask((1u << tx_dma) | (1u << rx_dma));
+    absolute_time_t deadline = make_timeout_time_ms(kFrameTimeoutMs);
     while (pio_sm_is_tx_fifo_empty(service_pio, service_sm)) {
+        if (time_reached(deadline)) {
+            abort_transport_frame();
+            return false;
+        }
         tight_loop_contents();
     }
     pio_sm_set_enabled(service_pio, service_sm, true);
-    dma_channel_wait_for_finish_blocking(rx_dma);
+    while (dma_channel_is_busy(rx_dma)) {
+        if (time_reached(deadline)) {
+            abort_transport_frame();
+            return false;
+        }
+        tight_loop_contents();
+    }
     while (!gpio_get(kCsPin)) {
+        if (time_reached(deadline)) {
+            abort_transport_frame();
+            return false;
+        }
         tight_loop_contents();
     }
     dma_channel_abort(tx_dma);
@@ -585,6 +654,7 @@ void transfer_frame()
     for (size_t i = 0; i < kFrameSize; ++i) {
         request[i] = static_cast<uint8_t>(rx_words[i]);
     }
+    return true;
 }
 
 void close_upload_file()
@@ -680,7 +750,7 @@ bool uploaded_gzip_shape_valid()
 
 bool begin_upload(const uint8_t* payload, size_t length)
 {
-    if (upload_active) {
+    if (upload_active || firmware_receive_active()) {
         last_error = kErrorUploadActive;
         return false;
     }
@@ -954,7 +1024,7 @@ void fail_incremental_copy(uint8_t error)
 
 bool begin_incremental_sd_to_flash_copy(uint8_t context, const char* path)
 {
-    if (upload_active) {
+    if (upload_active || firmware_receive_active()) {
         last_error = kErrorUploadActive;
         return false;
     }
@@ -1087,7 +1157,7 @@ void prepare_incremental_copy_status(uint32_t nonce, size_t* response_length)
 
 bool delete_catalog_sd_image(uint8_t context, const char* path)
 {
-    if (upload_active) {
+    if (upload_active || firmware_receive_active()) {
         last_error = kErrorUploadActive;
         return false;
     }
@@ -1156,7 +1226,7 @@ void start_catalog_read(uint32_t size)
 
 bool begin_catalog_sd_read(uint8_t context, const char* path)
 {
-    if (upload_active || copy_source_open ||
+    if (upload_active || firmware_receive_active() || copy_source_open ||
         catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
@@ -1202,7 +1272,7 @@ bool begin_catalog_sd_read(uint8_t context, const char* path)
 
 bool begin_catalog_golden_read(uint8_t context)
 {
-    if (upload_active || copy_source_open ||
+    if (upload_active || firmware_receive_active() || copy_source_open ||
         catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
@@ -1226,7 +1296,7 @@ bool begin_catalog_golden_read(uint8_t context)
 
 bool begin_catalog_flash_read(uint8_t context)
 {
-    if (upload_active || copy_source_open ||
+    if (upload_active || firmware_receive_active() || copy_source_open ||
         catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
@@ -1334,7 +1404,7 @@ bool finish_catalog_read(uint32_t nonce, size_t* response_length)
 bool copy_sd_image_to_flash(uint8_t context, const char* path,
                             uint32_t* copied_size)
 {
-    if (upload_active) {
+    if (upload_active || firmware_receive_active()) {
         last_error = kErrorUploadActive;
         return false;
     }
@@ -1416,6 +1486,32 @@ bool copy_sd_image_to_flash(uint8_t context, const char* path,
     return true;
 }
 
+void prepare_firmware_status(uint32_t nonce, size_t* response_length)
+{
+    const firmware_update::FirmwareReceiveStatus receive =
+        firmware_receiver.status();
+    const firmware_update::UpdateJournalStatus journal =
+        firmware_update::read_update_journal(firmware_storage,
+                                             firmware_board_revision());
+    write_le32(command_response, nonce);
+    command_response[4] = static_cast<uint8_t>(firmware_board_revision());
+    write_le16(command_response + 5, firmware_update::kLoaderAbiVersion);
+    command_response[7] = kFirmwareMajor;
+    command_response[8] = kFirmwareMinor;
+    command_response[9] = journal.valid ? 1 : 0;
+    command_response[10] = journal.valid ? journal.record.state : 0;
+    command_response[11] = static_cast<uint8_t>(receive.state);
+    command_response[12] = static_cast<uint8_t>(receive.error);
+    command_response[13] = static_cast<uint8_t>(receive.validation);
+    write_le32(command_response + 14, receive.next_offset);
+    write_le32(command_response + 18, receive.progress);
+    write_le32(command_response + 22, receive.progress_total);
+    write_le32(command_response + 26, receive.package_size);
+    write_le32(command_response + 30, receive.payload_size);
+    command_response[34] = journal.valid ? journal.record.result : 0;
+    *response_length = 35;
+}
+
 bool process_request(SupervisorReconfigureRequest* reconfigure_request)
 {
     if (request[0] != kRequestMagic) {
@@ -1490,7 +1586,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandReconfigure:
         if (length != 1 || request[kHeaderSize] >= 4) {
             last_error = kErrorBadSlot;
-        } else if (upload_active) {
+        } else if (upload_active || firmware_receive_active()) {
             last_error = kErrorUploadActive;
         } else if (request[kHeaderSize] != physical_context) {
             last_error = kErrorContextMismatch;
@@ -1603,7 +1699,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandReconfigureSelected:
         if (length != 5 || request[kHeaderSize + 4] >= kBootContextCount) {
             last_error = kErrorBadSlot;
-        } else if (upload_active) {
+        } else if (upload_active || firmware_receive_active()) {
             last_error = kErrorUploadActive;
         } else if (request[kHeaderSize + 4] != physical_context) {
             last_error = kErrorContextMismatch;
@@ -1621,7 +1717,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandReconfigureOnce:
         if (length < 7) {
             last_error = kErrorLength;
-        } else if (upload_active) {
+        } else if (upload_active || firmware_receive_active()) {
             last_error = kErrorUploadActive;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
@@ -1669,7 +1765,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandRestartSupervisor:
         if (length != 4) {
             last_error = kErrorLength;
-        } else if (upload_active) {
+        } else if (upload_active || firmware_receive_active()) {
             last_error = kErrorUploadActive;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
@@ -1683,7 +1779,7 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandClearFlash:
         if (length != 5 || request[kHeaderSize + 4] >= kBootContextCount) {
             last_error = kErrorBadSlot;
-        } else if (upload_active) {
+        } else if (upload_active || firmware_receive_active()) {
             last_error = kErrorUploadActive;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
@@ -1905,6 +2001,79 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
             finish_catalog_read(nonce, &response_length);
         }
         break;
+    case kCommandFirmwareInfo:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else {
+            prepare_firmware_status(read_le32(request + kHeaderSize),
+                                    &response_length);
+            last_error = kErrorNone;
+        }
+        break;
+    case kCommandFirmwareBegin:
+        if (length != 8) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint32_t package_size =
+                read_le32(request + kHeaderSize + 4);
+            const bool available = !upload_active && !copy_source_open &&
+                catalog_read_source == CatalogReadSource::None;
+            const bool ok = available && firmware_receiver.begin(package_size);
+            prepare_firmware_status(nonce, &response_length);
+            last_error = ok ? kErrorNone : kErrorFirmwareUpdate;
+        }
+        break;
+    case kCommandFirmwareData:
+        if (length < 9) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const uint32_t offset = read_le32(request + kHeaderSize + 4);
+            const bool ok = firmware_receiver.write(
+                offset, request + kHeaderSize + 8, length - 8);
+            prepare_firmware_status(nonce, &response_length);
+            last_error = ok ? kErrorNone : kErrorFirmwareUpdate;
+        }
+        break;
+    case kCommandFirmwareEnd:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const bool ok = firmware_receiver.finish();
+            prepare_firmware_status(nonce, &response_length);
+            last_error = ok ? kErrorNone : kErrorFirmwareUpdate;
+        }
+        break;
+    case kCommandFirmwareAbort:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const bool ok = firmware_receiver.abort();
+            prepare_firmware_status(nonce, &response_length);
+            last_error = ok ? kErrorNone : kErrorFirmwareUpdate;
+        }
+        break;
+    case kCommandFirmwareApply:
+        if (length != 4) {
+            last_error = kErrorLength;
+        } else {
+            const uint32_t nonce = read_le32(request + kHeaderSize);
+            const bool available = !upload_active && !copy_source_open &&
+                catalog_read_source == CatalogReadSource::None;
+            if (!available || !firmware_receiver.ready_to_apply()) {
+                prepare_firmware_status(nonce, &response_length);
+                last_error = kErrorFirmwareUpdate;
+            } else {
+                reconfigure_request->restart = true;
+                prepare_firmware_status(nonce, &response_length);
+                last_error = kErrorNone;
+                reconfigure = true;
+            }
+        }
+        break;
     default:
         last_error = kErrorProtocol;
         break;
@@ -1971,11 +2140,19 @@ void supervisor_service_init(bool sd_mounted, uint8_t active_context)
     copy_state = kCopyIdle;
     copy_error = kErrorNone;
     copy_erase_offset = 0;
+    firmware_receiver.initialize(&firmware_storage,
+                                 firmware_board_revision());
     prepare_response(0);
 }
 
 bool supervisor_service_once(SupervisorReconfigureRequest* request)
 {
-    transfer_frame();
+    firmware_receiver.service_step();
+    if (!transfer_frame()) {
+        // A flash operation can make us miss the beginning of an autonomous
+        // FPGA poll/retry frame. Discard partial input and re-arm on the next
+        // clean CSn edge, leaving the prepared response unchanged.
+        return false;
+    }
     return process_request(request);
 }

@@ -1,0 +1,30 @@
+/* Keep the immutable loader inside its reserved 64 KiB region. */
+ASSERT(__flash_binary_end <= 0x10010000,
+       "first-stage loader exceeds its 64 KiB flash region")
+
+/*
+ * A factory/SWD/BOOTSEL image contains the already manifested active
+ * application.  The input section is generated with .incbin from the .k2fw
+ * package built for this board revision.
+ */
+SECTIONS
+{
+    .firmware_image 0x10010000 :
+    {
+        KEEP(*(.firmware_image))
+    } > FLASH
+
+    .firmware_journal 0x107e0000 :
+    {
+        KEEP(*(.firmware_journal))
+    } > FLASH
+}
+
+ASSERT(SIZEOF(.firmware_image) <= 0x270000,
+       "factory application image exceeds its flash slot")
+ASSERT(ADDR(.firmware_image) + SIZEOF(.firmware_image) <= 0x10280000,
+       "factory application image overlaps the rollback slot")
+ASSERT(SIZEOF(.firmware_journal) == 0x2000,
+       "factory update journal must contain exactly two sectors")
+ASSERT(ADDR(.firmware_journal) == 0x107e0000,
+       "factory update journal moved from its fixed flash offset")
