@@ -13,8 +13,8 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 set(PICO_BOARD pico CACHE STRING "Board type")
-# The application occupies the low part of a 16 MiB device. The upper 8 MiB
-# contains four fixed 2 MiB FPGA image slots.
+# The loader and application partitions occupy the low 8 MiB of a 16 MiB
+# device. The upper 8 MiB contains four fixed 2 MiB FPGA image slots.
 set(PICO_FLASH_SIZE_BYTES 16777216 CACHE STRING "Physical flash size")
 
 # Generated Cmake Pico project file
@@ -44,6 +44,10 @@ configure_file(
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
+
+# Python is part of the normal build now: it creates and validates the
+# manifested application embedded in each factory image.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # One recovery payload is linked into each board-specific manager below the
 # mutable 8 MiB slot bank. It is exposed in contexts 1 and 4 without being
@@ -140,17 +144,23 @@ option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" OFF)
 set(FPGA_MGR_SOURCES
     boot_config.cpp
     boot_log.cpp
+    firmware_image.cpp
+    firmware_staging.cpp
+    firmware_trial.cpp
+    firmware_update_engine.cpp
     fpga_mgr.cpp
     golden_images.cpp
     hw_config.c
     miniz.c
     miniz_tinfl.c
     miniz_tdef.c
+    rp2040_firmware_storage.cpp
+    sha256.cpp
     supervisor_service.cpp
 )
 
-function(add_fpga_manager_variant K2_BOARD_REVISION)
-    set(FPGA_MGR_TARGET fpga_mgr_${K2_BOARD_REVISION})
+function(add_fpga_manager_application K2_BOARD_REVISION K2_BOARD_ID)
+    set(FPGA_MGR_TARGET fpga_mgr_app_${K2_BOARD_REVISION})
     add_executable(${FPGA_MGR_TARGET}
         ${FPGA_MGR_SOURCES}
         ${GOLDEN_ASSEMBLY_${K2_BOARD_REVISION}}
@@ -164,6 +174,7 @@ function(add_fpga_manager_variant K2_BOARD_REVISION)
         -Wno-unused-function
     )
     target_compile_definitions(${FPGA_MGR_TARGET} PRIVATE
+        K2_BOARD_ID=${K2_BOARD_ID}
         K2_BOARD_REVISION="${K2_BOARD_REVISION}"
     )
 
@@ -203,6 +214,10 @@ function(add_fpga_manager_variant K2_BOARD_REVISION)
     pico_enable_stdio_usb(${FPGA_MGR_TARGET} 1)
     pico_add_extra_outputs(${FPGA_MGR_TARGET})
 
+    pico_add_linker_script_override_path(${FPGA_MGR_TARGET}
+        ${CMAKE_CURRENT_LIST_DIR}/linker/application
+        FILES pico_flash_region.ld)
+
     target_include_directories(${FPGA_MGR_TARGET} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_BINARY_DIR}
@@ -210,13 +225,101 @@ function(add_fpga_manager_variant K2_BOARD_REVISION)
     )
 endfunction()
 
-foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
-    add_fpga_manager_variant(${K2_BOARD_REVISION})
-endforeach()
+add_fpga_manager_application(B0C 1)
+add_fpga_manager_application(B3B 2)
+
+function(add_fpga_manager_factory K2_BOARD_REVISION K2_BOARD_ID)
+    set(FPGA_MGR_APP_TARGET fpga_mgr_app_${K2_BOARD_REVISION})
+    set(FIRMWARE_PACKAGE
+        ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_${K2_BOARD_REVISION}_${PROJECT_VERSION}.k2fw)
+
+    add_custom_command(
+        OUTPUT ${FIRMWARE_PACKAGE}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_LIST_DIR}/tools/firmware_package.py create
+                --payload ${CMAKE_CURRENT_BINARY_DIR}/${FPGA_MGR_APP_TARGET}.bin
+                --output ${FIRMWARE_PACKAGE}
+                --board ${K2_BOARD_REVISION}
+                --version ${PROJECT_VERSION}
+                --build-id fpga_mgr-${PROJECT_VERSION}-${K2_BOARD_REVISION}
+        DEPENDS ${FPGA_MGR_APP_TARGET}
+                ${CMAKE_CURRENT_LIST_DIR}/tools/firmware_package.py
+        COMMENT "Packaging Rev${K2_BOARD_REVISION} updateable application"
+        VERBATIM
+    )
+    add_custom_target(fpga_mgr_${K2_BOARD_REVISION}_update_package
+        DEPENDS ${FIRMWARE_PACKAGE})
+
+    set(FIRMWARE_JOURNAL
+        ${CMAKE_CURRENT_BINARY_DIR}/firmware_factory_journal_${K2_BOARD_REVISION}.bin)
+    add_custom_command(
+        OUTPUT ${FIRMWARE_JOURNAL}
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_LIST_DIR}/tools/firmware_package.py
+                factory-journal
+                --package ${FIRMWARE_PACKAGE}
+                --output ${FIRMWARE_JOURNAL}
+        DEPENDS ${FIRMWARE_PACKAGE}
+                ${CMAKE_CURRENT_LIST_DIR}/tools/firmware_package.py
+        COMMENT "Creating Rev${K2_BOARD_REVISION} factory update journal"
+        VERBATIM
+    )
+
+    set(FIRMWARE_PACKAGE_PATH ${FIRMWARE_PACKAGE})
+    set(FIRMWARE_JOURNAL_PATH ${FIRMWARE_JOURNAL})
+    set(FACTORY_ASSEMBLY
+        ${CMAKE_CURRENT_BINARY_DIR}/firmware_factory_image_${K2_BOARD_REVISION}.S)
+    configure_file(firmware_factory_image.S.in ${FACTORY_ASSEMBLY} @ONLY)
+    set_property(SOURCE ${FACTORY_ASSEMBLY} APPEND PROPERTY
+        OBJECT_DEPENDS "${FIRMWARE_PACKAGE};${FIRMWARE_JOURNAL}")
+
+    set(FPGA_MGR_FACTORY_TARGET fpga_mgr_${K2_BOARD_REVISION})
+    add_executable(${FPGA_MGR_FACTORY_TARGET}
+        firmware_loader.cpp
+        firmware_image.cpp
+        firmware_update_engine.cpp
+        rp2040_firmware_storage.cpp
+        sha256.cpp
+        ${FACTORY_ASSEMBLY}
+    )
+    add_dependencies(${FPGA_MGR_FACTORY_TARGET}
+        fpga_mgr_${K2_BOARD_REVISION}_update_package)
+
+    target_compile_options(${FPGA_MGR_FACTORY_TARGET} PRIVATE
+        -Wall
+        -Wextra
+        -Wformat=2
+        -Werror=format
+    )
+    target_compile_definitions(${FPGA_MGR_FACTORY_TARGET} PRIVATE
+        K2_BOARD_ID=${K2_BOARD_ID}
+        K2_BOARD_REVISION="${K2_BOARD_REVISION}"
+    )
+    target_include_directories(${FPGA_MGR_FACTORY_TARGET} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR})
+    target_link_libraries(${FPGA_MGR_FACTORY_TARGET}
+        pico_stdlib
+        hardware_flash
+        hardware_watchdog
+    )
+
+    pico_set_program_name(${FPGA_MGR_FACTORY_TARGET}
+        "${FPGA_MGR_FACTORY_TARGET}")
+    pico_set_program_version(${FPGA_MGR_FACTORY_TARGET} "${PROJECT_VERSION}")
+    pico_enable_stdio_uart(${FPGA_MGR_FACTORY_TARGET} 0)
+    pico_enable_stdio_usb(${FPGA_MGR_FACTORY_TARGET} 0)
+    pico_add_extra_outputs(${FPGA_MGR_FACTORY_TARGET})
+    pico_add_linker_script_override_path(${FPGA_MGR_FACTORY_TARGET}
+        ${CMAKE_CURRENT_LIST_DIR}/linker/factory
+        FILES section_extra_post_end.incl)
+endfunction()
+
+add_fpga_manager_factory(B0C 1)
+add_fpga_manager_factory(B3B 2)
 
 add_custom_target(fpga_mgr DEPENDS fpga_mgr_B0C fpga_mgr_B3B)
-
-find_package(Python3 COMPONENTS Interpreter)
+add_custom_target(fpga_mgr_update_packages
+    DEPENDS fpga_mgr_B0C_update_package fpga_mgr_B3B_update_package)
 
 set(_PICO_VSCODE_PICOTOOL ${USERHOME}/.pico-sdk/picotool/${picotoolVersion}/picotool/picotool)
 if (EXISTS ${_PICO_VSCODE_PICOTOOL})
@@ -227,7 +330,7 @@ else()
     find_program(PICOTOOL_EXECUTABLE picotool)
 endif()
 
-if (PICOTOOL_EXECUTABLE AND Python3_Interpreter_FOUND)
+if (PICOTOOL_EXECUTABLE)
     foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
         set(FPGA_GZIP_0 ${GOLDEN_${K2_BOARD_REVISION}_CONTEXT1})
         set(FPGA_UF2_0
@@ -257,10 +360,6 @@ else()
     if (NOT PICOTOOL_EXECUTABLE)
         string(APPEND _FPGA_UF2_MISSING " picotool")
     endif()
-    if (NOT Python3_Interpreter_FOUND)
-        string(APPEND _FPGA_UF2_MISSING " Python3")
-    endif()
-
     message(STATUS
         "Skipping fpga_mgr_with_fpga_uf2 generation; missing prerequisites:${_FPGA_UF2_MISSING}")
 

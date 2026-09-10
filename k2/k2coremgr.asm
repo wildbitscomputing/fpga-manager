@@ -138,6 +138,12 @@ COMMAND_RESTART_SUPERVISOR = $15
 COMMAND_READ_SD_BEGIN   = $16
 COMMAND_READ_SD_DATA    = $17
 COMMAND_READ_SD_END     = $18
+COMMAND_FIRMWARE_INFO   = $19
+COMMAND_FIRMWARE_BEGIN  = $1a
+COMMAND_FIRMWARE_DATA   = $1b
+COMMAND_FIRMWARE_END    = $1c
+COMMAND_FIRMWARE_ABORT  = $1d
+COMMAND_FIRMWARE_APPLY  = $1e
 COMMAND_IMAGE_BEGIN     = $02
 COMMAND_IMAGE_DATA      = $03
 COMMAND_IMAGE_END       = $04
@@ -146,8 +152,10 @@ COMMAND_IMAGE_STATUS    = $07
 
 TARGET_SD_NAMED         = 3
 TARGET_FLASH_GZIP       = 2
+TARGET_FIRMWARE         = 4
 FORMAT_RAW              = 1
 FORMAT_GZIP             = 2
+FORMAT_FIRMWARE         = 3
 MAX_PAYLOAD             = 240
 READ_SD_CHUNK_SIZE      = 232
 
@@ -222,6 +230,7 @@ PROGRESS_KIND_SCAN      = 1
 PROGRESS_KIND_MANAGER   = 2
 PROGRESS_KIND_FLASH     = 3
 PROGRESS_KIND_EXPORT    = 4
+PROGRESS_KIND_FIRMWARE  = 5
 
 COPY_STATE_ERASING      = 1
 COPY_STATE_WRITING      = 2
@@ -269,6 +278,7 @@ LOCAL_ENTRY_NAME_MAX    = 62
 LOCAL_MAX_ENTRIES       = 255
 LOCAL_FLAG_DIRECTORY    = $01
 LOCAL_FLAG_IMAGE        = $02
+LOCAL_FLAG_FIRMWARE     = $04
 
             .cerror LOCAL_ENTRY_BUFFER + LOCAL_ENTRY_SIZE * LOCAL_MAX_ENTRIES > $8000, "Local directory cache overlaps the PGZ image"
 
@@ -280,6 +290,15 @@ EXPORT_TEMPORARY        = $2140
 EXPORT_BASENAME         = $21c0
 EXPORT_BACKUP           = $2240
 EXPORT_BACKUP_NAME      = $22c0
+tx_buffer               = $2400
+response_buffer         = $2500
+io_buffer               = $2600
+local_trash             = $2700
+delete_path             = $2800
+local_path              = $2900
+filename                = $2980
+install_name            = $2a00
+begin_payload           = $2a40
 CRC_TABLE0              = $3000
 CRC_TABLE1              = $3100
 CRC_TABLE2              = $3200
@@ -636,6 +655,8 @@ menu_loop:
             beq     run_highlighted
             cmp     #'s'
             beq     boot_highlighted
+            cmp     #'u'
+            beq     update_firmware_highlighted
             cmp     #'q'
             bne     +
             jmp     restart_computer
@@ -1058,6 +1079,80 @@ local_flash_unavailable:
             ldx     #>direct_flash_unavailable_text
             jsr     draw_status
             jmp     menu_loop
+
+update_firmware_highlighted:
+            lda     view_mode
+            beq     firmware_update_wrong_view
+            ; A verified pending candidate survives returning to the browser.
+            ; Offer to apply it again without rescanning the source file.
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_INFO
+            ldx     #4
+            jsr     mailbox_command_response
+            bcs     command_failure
+            jsr     firmware_require_status
+            bcs     command_failure
+            lda     response_buffer+11
+            cmp     #4                  ; READY
+            beq     firmware_update_confirm
+            lda     local_count
+            beq     firmware_update_unavailable
+            jsr     local_entry_pointer
+            ldy     #LOCAL_ENTRY_FLAGS
+            lda     (ZP_POINTER),y
+            and     #LOCAL_FLAG_FIRMWARE
+            beq     firmware_update_unavailable
+            jsr     prepare_transfer_filename
+            bcs     command_failure
+            lda     #TARGET_FIRMWARE
+            sta     transfer_target
+            jsr     install_prepared_entry
+            bcs     firmware_update_failed
+firmware_update_confirm:
+            jsr     draw_local_screen
+            jsr     draw_firmware_apply_confirmation
+firmware_update_confirmation_key:
+            jsr     wait_key
+            lda     EVENT_KEY_ASCII
+            ora     #$20
+            cmp     #'y'
+            beq     firmware_update_apply
+            lda     EVENT_KEY_RAW
+            cmp     #KEY_BREAK
+            beq     firmware_update_cancelled
+            cmp     #KEY_ESC
+            bne     firmware_update_confirmation_key
+firmware_update_cancelled:
+            jsr     draw_local_screen
+            lda     #<firmware_staged_text
+            ldx     #>firmware_staged_text
+            jsr     draw_status
+            jmp     menu_loop
+firmware_update_apply:
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_APPLY
+            ldx     #4
+            jsr     mailbox_command_response
+            bcs     command_failure
+            lda     #<firmware_apply_text
+            ldx     #>firmware_apply_text
+            jsr     draw_status
+            jmp     boot_wait
+firmware_update_failed:
+            lda     transfer_cancelled
+            beq     command_failure
+            jsr     draw_local_screen
+            lda     #<scan_cancelled_text
+            ldx     #>scan_cancelled_text
+            jsr     draw_status
+            jmp     menu_loop
+firmware_update_unavailable:
+            jsr     draw_local_screen
+firmware_update_wrong_view:
+            lda     #<firmware_update_unavailable_text
+            ldx     #>firmware_update_unavailable_text
+            jsr     draw_status
+            jmp     menu_loop
 local_enter_directory:
             jsr     local_append_directory
             bcs     menu_loop
@@ -1449,6 +1544,10 @@ local_check_image:
             bcc     +
             lda     #LOCAL_FLAG_IMAGE
             bra     local_store_flags
++           jsr     local_filename_is_firmware
+            bcc     +
+            lda     #LOCAL_FLAG_FIRMWARE
+            bra     local_store_flags
 +           lda     #0
 local_store_flags:
             ldy     #LOCAL_ENTRY_FLAGS
@@ -1618,6 +1717,41 @@ local_check_bin:
             sec
             rts
 local_not_image:
+            clc
+            rts
+
+; ZP_POINTER addresses the flags byte and the NUL-terminated name follows it.
+local_filename_is_firmware:
+            lda     local_name_length
+            cmp     #5
+            bcc     local_not_firmware
+            tay
+            lda     (ZP_POINTER),y
+            ora     #$20
+            cmp     #'w'
+            bne     local_not_firmware
+            dey
+            lda     (ZP_POINTER),y
+            ora     #$20
+            cmp     #'f'
+            bne     local_not_firmware
+            dey
+            lda     (ZP_POINTER),y
+            ora     #$20
+            cmp     #'2'
+            bne     local_not_firmware
+            dey
+            lda     (ZP_POINTER),y
+            ora     #$20
+            cmp     #'k'
+            bne     local_not_firmware
+            dey
+            lda     (ZP_POINTER),y
+            cmp     #'.'
+            bne     local_not_firmware
+            sec
+            rts
+local_not_firmware:
             clc
             rts
 
@@ -1840,6 +1974,8 @@ transfer_opened:
             lda     transfer_phase
             beq     transfer_request_next
             lda     transfer_target
+            cmp     #TARGET_FIRMWARE
+            beq     transfer_opened_firmware
             cmp     #TARGET_FLASH_GZIP
             beq     transfer_opened_flash
             lda     #<install_text
@@ -1891,6 +2027,29 @@ transfer_begin_not_confirmed:
             sta     mailbox_error
             bra     transfer_mailbox_failure
 
+transfer_opened_firmware:
+            lda     #<firmware_stage_text
+            ldx     #>firmware_stage_text
+            jsr     draw_status
+            jsr     prepare_nonce
+            ldx     #3
+-           lda     file_size,x
+            sta     tx_buffer+4,x
+            dex
+            bpl     -
+            lda     #1
+            sta     upload_started
+            lda     #COMMAND_FIRMWARE_BEGIN
+            ldx     #8
+            jsr     mailbox_command_response
+            bcs     transfer_mailbox_failure
+            jsr     firmware_require_status
+            bcs     transfer_mailbox_failure
+            lda     response_buffer+11
+            cmp     #1                  ; MANIFEST
+            bne     transfer_sync_failure
+            jmp     transfer_request_next
+
 transfer_data:
             lda     EVENT_STREAM
             cmp     transfer_stream
@@ -1915,6 +2074,9 @@ transfer_data:
             bra     transfer_request_next
 
 transfer_upload_data:
+            lda     transfer_target
+            cmp     #TARGET_FIRMWARE
+            beq     transfer_firmware_data
             stz     transfer_retry
 transfer_data_retry:
             lda     #COMMAND_PING
@@ -1961,11 +2123,81 @@ transfer_progress_resync_check:
             bne     transfer_request_next
             jsr     transfer_resync_mailbox
             bcs     transfer_mailbox_failure
+            bra     transfer_request_next
+
+transfer_firmware_data:
+            ldx     #3
+-           lda     uploaded_size,x
+            sta     tx_buffer+4,x
+            dex
+            bpl     -
+            ldy     #0
+transfer_firmware_copy_chunk:
+            cpy     chunk_length
+            beq     transfer_firmware_chunk_ready
+            lda     io_buffer,y
+            sta     tx_buffer+8,y
+            iny
+            bra     transfer_firmware_copy_chunk
+transfer_firmware_chunk_ready:
+            jsr     build_expected_upload_size
+            stz     transfer_retry
+transfer_firmware_data_retry:
+            jsr     prepare_nonce
+            lda     chunk_length
+            clc
+            adc     #8
+            tax
+            lda     #COMMAND_FIRMWARE_DATA
+            jsr     mailbox_command_response
+            bcs     transfer_firmware_data_recover
+            jsr     firmware_require_status
+            bcs     transfer_firmware_data_recover
+            jsr     firmware_response_matches_expected
+            bcc     transfer_firmware_data_accepted
+transfer_firmware_data_recover:
+            inc     transfer_retry
+            lda     transfer_retry
+            cmp     #8
+            bcs     transfer_mailbox_failure
+            jsr     firmware_recover_data_position
+            bcs     transfer_firmware_data_recover
+            cmp     #1                  ; reply lost after chunk was accepted
+            beq     transfer_firmware_data_accepted
+            bra     transfer_firmware_data_retry
+transfer_firmware_data_accepted:
+            ldx     #3
+-           lda     expected_upload_size,x
+            sta     uploaded_size,x
+            dex
+            bpl     -
+            jsr     draw_firmware_receive_progress
+            lda     response_buffer+11
+            cmp     #2                  ; ERASING
+            bne     transfer_firmware_resync_check
+            jsr     firmware_wait_for_payload
+            bcs     transfer_mailbox_failure
+transfer_firmware_resync_check:
+            inc     transfer_progress
+            lda     transfer_progress
+            and     #$3f
+            bne     transfer_request_next
+            jsr     transfer_resync_firmware
+            bcs     transfer_mailbox_failure
 
 transfer_request_next:
             lda     transfer_stream
             sta     KARGS_FILE_STREAM
+            lda     transfer_phase
+            beq     transfer_request_full_chunk
+            lda     transfer_target
+            cmp     #TARGET_FIRMWARE
+            bne     transfer_request_full_chunk
+            jsr     firmware_next_read_length
+            bra     transfer_request_length_ready
+transfer_request_full_chunk:
             lda     #MAX_PAYLOAD
+transfer_request_length_ready:
             sta     KARGS_FILE_READ_LEN
             jsr     KERNEL_FILE_READ
             bcs     transfer_file_failure
@@ -1977,6 +2209,9 @@ transfer_eof:
             bne     transfer_event_loop
             lda     transfer_phase
             beq     transfer_close_file
+            lda     transfer_target
+            cmp     #TARGET_FIRMWARE
+            beq     transfer_firmware_end
             stz     transfer_retry
 transfer_end_retry:
             lda     #COMMAND_IMAGE_END
@@ -2009,6 +2244,20 @@ transfer_end_not_confirmed:
 transfer_end_confirmed:
             stz     upload_started
             jsr     draw_install_progress
+            bra     transfer_close_file
+transfer_firmware_end:
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_END
+            ldx     #4
+            jsr     mailbox_command_response
+            bcs     transfer_mailbox_failure
+            jsr     firmware_require_status
+            bcs     transfer_mailbox_failure
+            lda     response_buffer+11
+            cmp     #4                  ; READY
+            bne     transfer_sync_failure
+            stz     upload_started
+            jsr     draw_firmware_ready_progress
 transfer_close_file:
             lda     transfer_stream
             sta     KARGS_FILE_STREAM
@@ -2030,7 +2279,14 @@ transfer_closed:
             lda     #1
             sta     transfer_phase
             stz     transfer_progress
+            lda     transfer_target
+            cmp     #TARGET_FIRMWARE
+            beq     transfer_draw_firmware_progress
             jsr     draw_install_progress
+            bra     transfer_reopen_file
+transfer_draw_firmware_progress:
+            jsr     draw_firmware_receive_progress
+transfer_reopen_file:
             jsr     open_transfer_file
             bcs     transfer_open_error
             jmp     transfer_event_loop
@@ -2074,6 +2330,15 @@ abort_transfer_upload:
             lda     upload_started
             beq     +
             stz     upload_started
+            lda     transfer_target
+            cmp     #TARGET_FIRMWARE
+            bne     abort_legacy_upload
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_ABORT
+            ldx     #4
+            jsr     mailbox_command_response
+            bra     +
+abort_legacy_upload:
             lda     #COMMAND_IMAGE_ABORT
             ldx     #0
             jsr     mailbox_command
@@ -2084,6 +2349,7 @@ abort_transfer_upload:
 ; count. IMAGE_ABORT/IMAGE_BEGIN are intentionally not involved, so the
 ; transactional destination file remains open across this re-sync.
 transfer_resync_mailbox:
+            stz     MMU_IO_CTRL
             lda     #(MAILBOX_CONTROL_ENABLE | MAILBOX_CONTROL_CLEAR | MAILBOX_CONTROL_RESET)
             sta     MAILBOX_CONTROL
             lda     #MAILBOX_CONTROL_ENABLE
@@ -2105,6 +2371,174 @@ transfer_resync_failed:
             lda     #$fc
             sta     mailbox_error
             sec
+            rts
+
+transfer_resync_firmware:
+            stz     MMU_IO_CTRL
+            lda     #(MAILBOX_CONTROL_ENABLE | MAILBOX_CONTROL_CLEAR | MAILBOX_CONTROL_RESET)
+            sta     MAILBOX_CONTROL
+            lda     #MAILBOX_CONTROL_ENABLE
+            sta     MAILBOX_CONTROL
+            jsr     mailbox_wait_online
+            bcs     transfer_resync_failed
+            jsr     mailbox_delay
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_INFO
+            ldx     #4
+            jsr     mailbox_command_response
+            bcs     transfer_resync_failed
+            jsr     firmware_require_status
+            bcs     transfer_resync_failed
+            jsr     firmware_response_matches_uploaded
+            bcs     transfer_resync_failed
+            clc
+            rts
+
+firmware_require_status:
+            lda     response_length
+            cmp     #34
+            bcc     firmware_bad_response
+            clc
+            rts
+firmware_bad_response:
+            lda     #$fa
+            sta     mailbox_error
+            sec
+            rts
+
+firmware_response_matches_expected:
+            ldx     #3
+-           lda     response_buffer+14,x
+            cmp     expected_upload_size,x
+            bne     firmware_position_bad
+            dex
+            bpl     -
+            clc
+            rts
+firmware_response_matches_uploaded:
+            ldx     #3
+-           lda     response_buffer+14,x
+            cmp     uploaded_size,x
+            bne     firmware_position_bad
+            dex
+            bpl     -
+            clc
+            rts
+firmware_position_bad:
+            lda     #$fc
+            sta     mailbox_error
+            sec
+            rts
+
+; Recover a FIRMWARE_DATA transaction whose pipelined response was lost.
+; The RP2040 receiver is offset-addressed, so its reported position proves
+; whether the chunk was committed without ever writing it twice.
+; Returns A=1 if the expected position was committed, A=0 if the original
+; position is still current and the caller should resend, or carry set when
+; the bridge/status query itself could not be recovered.
+firmware_recover_data_position:
+            stz     MMU_IO_CTRL
+            lda     #(MAILBOX_CONTROL_ENABLE | MAILBOX_CONTROL_CLEAR | MAILBOX_CONTROL_RESET)
+            sta     MAILBOX_CONTROL
+            lda     #MAILBOX_CONTROL_ENABLE
+            sta     MAILBOX_CONTROL
+            jsr     mailbox_wait_online
+            bcs     firmware_recover_position_failed
+            jsr     mailbox_delay
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_INFO
+            ldx     #4
+            jsr     mailbox_command_response
+            bcs     firmware_recover_position_failed
+            jsr     firmware_require_status
+            bcs     firmware_recover_position_failed
+            lda     response_buffer+11
+            cmp     #3                  ; PAYLOAD
+            bne     firmware_recover_position_failed
+            ldx     #3
+firmware_recover_expected_loop:
+            lda     response_buffer+14,x
+            cmp     expected_upload_size,x
+            bne     firmware_recover_check_uploaded
+            dex
+            bpl     firmware_recover_expected_loop
+            lda     #1
+            clc
+            rts
+firmware_recover_check_uploaded:
+            ldx     #3
+firmware_recover_uploaded_loop:
+            lda     response_buffer+14,x
+            cmp     uploaded_size,x
+            bne     firmware_recover_position_failed
+            dex
+            bpl     firmware_recover_uploaded_loop
+            lda     #0
+            clc
+            rts
+firmware_recover_position_failed:
+            lda     #$fc
+            sta     mailbox_error
+            sec
+            rts
+
+firmware_wait_for_payload:
+            jsr     read_firmware_progress_response
+            jsr     draw_firmware_erase_progress
+firmware_wait_payload_loop:
+            jsr     prepare_nonce
+            lda     #COMMAND_FIRMWARE_INFO
+            ldx     #4
+            jsr     mailbox_command_response
+            bcs     firmware_wait_payload_error
+            jsr     firmware_require_status
+            bcs     firmware_wait_payload_error
+            lda     response_buffer+11
+            cmp     #3                  ; PAYLOAD
+            beq     firmware_wait_payload_done
+            cmp     #2                  ; ERASING
+            bne     firmware_receiver_failed
+            jsr     read_firmware_progress_response
+            jsr     draw_firmware_erase_progress
+            bra     firmware_wait_payload_loop
+firmware_wait_payload_done:
+            jsr     firmware_response_matches_uploaded
+            rts
+firmware_receiver_failed:
+            lda     response_buffer+12
+            ora     #$d0
+            sta     mailbox_error
+firmware_wait_payload_error:
+            sec
+            rts
+
+read_firmware_progress_response:
+            ldx     #3
+-           lda     response_buffer+18,x
+            sta     progress_current,x
+            lda     response_buffer+22,x
+            sta     progress_total,x
+            dex
+            bpl     -
+            rts
+
+firmware_next_read_length:
+            lda     uploaded_size+3
+            ora     uploaded_size+2
+            bne     firmware_full_read
+            lda     uploaded_size+1
+            cmp     #$10
+            bcs     firmware_full_read
+            cmp     #$0f
+            bcc     firmware_full_read
+            lda     uploaded_size
+            cmp     #$18
+            bcc     firmware_full_read
+            eor     #$ff
+            inc     a
+            rts
+firmware_full_read:
+            lda     #232
             rts
 
 prepare_transfer_filename:
@@ -2150,11 +2584,18 @@ prepare_path_copy:
 prepare_path_done:
             stz     filename,x
             stx     filename_length
+            jsr     transfer_filename_is_firmware
+            bcc     prepare_path_check_gzip
+            lda     #FORMAT_FIRMWARE
+            bra     prepare_path_format_done
+prepare_path_check_gzip:
             jsr     transfer_filename_is_gzip
             lda     #FORMAT_RAW
             bcc     +
             lda     #FORMAT_GZIP
-+           sta     transfer_format
++
+prepare_path_format_done:
+            sta     transfer_format
             clc
             rts
 prepare_path_error:
@@ -2175,6 +2616,40 @@ transfer_filename_is_gzip:
             lda     install_name,y
             ora     #$20
             cmp     #'g'
+            bne     +
+            dey
+            lda     install_name,y
+            cmp     #'.'
+            bne     +
+            sec
+            rts
++           clc
+            rts
+
+transfer_filename_is_firmware:
+            lda     install_name_length
+            cmp     #5
+            bcc     +
+            tay
+            dey
+            lda     install_name,y
+            ora     #$20
+            cmp     #'w'
+            bne     +
+            dey
+            lda     install_name,y
+            ora     #$20
+            cmp     #'f'
+            bne     +
+            dey
+            lda     install_name,y
+            ora     #$20
+            cmp     #'2'
+            bne     +
+            dey
+            lda     install_name,y
+            ora     #$20
+            cmp     #'k'
             bne     +
             dey
             lda     install_name,y
@@ -2272,6 +2747,8 @@ finish_scan:
             dex
             bpl     -
             lda     transfer_format
+            cmp     #FORMAT_FIRMWARE
+            beq     validate_firmware_scan
             cmp     #FORMAT_GZIP
             beq     validate_gzip_scan
             lda     file_size
@@ -2287,6 +2764,45 @@ finish_scan:
             bne     invalid_transfer_image
             clc
             rts
+validate_firmware_scan:
+            ; The RP2040 performs complete manifest, vector, and SHA-256
+            ; validation. Locally reject only obviously wrong/truncated files
+            ; before asking it to erase staging.
+            lda     header_count
+            cmp     #10
+            bne     invalid_transfer_image
+            lda     image_header+0
+            cmp     #'K'
+            bne     invalid_transfer_image
+            lda     image_header+1
+            cmp     #'2'
+            bne     invalid_transfer_image
+            lda     image_header+2
+            cmp     #'F'
+            bne     invalid_transfer_image
+            lda     image_header+3
+            cmp     #'W'
+            bne     invalid_transfer_image
+            ; package must exceed 4096 bytes and fit the 0x270000-byte slot
+            lda     file_size+3
+            bne     invalid_transfer_image
+            lda     file_size+2
+            cmp     #$27
+            bcc     validate_firmware_minimum
+            bne     invalid_transfer_image
+            lda     file_size+1
+            ora     file_size
+            bne     invalid_transfer_image
+validate_firmware_minimum:
+            lda     file_size+2
+            bne     valid_transfer_image
+            lda     file_size+1
+            cmp     #$10
+            bcc     invalid_transfer_image
+            bne     valid_transfer_image
+            lda     file_size
+            beq     invalid_transfer_image
+            bra     valid_transfer_image
 validate_gzip_scan:
             lda     header_count
             cmp     #10
@@ -3155,6 +3671,34 @@ draw_delete_instruction:
             stz     MMU_IO_CTRL
             rts
 
+draw_firmware_apply_confirmation:
+            lda     #2
+            sta     MMU_IO_CTRL
+            jsr     ui_dim_screen
+            lda     #UI_COLOR_ACCENT
+            sta     ui_modal_color
+            jsr     ui_draw_modal
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_MODAL_TOP+2
+            jsr     ui_set_xy
+            lda     #<firmware_ready_prompt_text
+            ldx     #>firmware_ready_prompt_text
+            jsr     ui_puts
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_MODAL_TOP+5
+            jsr     ui_set_xy
+            lda     #<firmware_restart_warning_text
+            ldx     #>firmware_restart_warning_text
+            jsr     ui_puts
+            ldx     #UI_MODAL_LEFT+3
+            ldy     #UI_MODAL_BOTTOM-2
+            jsr     ui_set_xy
+            lda     #<firmware_confirm_text
+            ldx     #>firmware_confirm_text
+            jsr     ui_puts
+            stz     MMU_IO_CTRL
+            rts
+
 draw_scan_progress:
             ldx     #3
 -           lda     file_size,x
@@ -3183,6 +3727,35 @@ draw_install_progress:
 draw_direct_flash_progress:
             lda     #<direct_flash_progress_text
             ldx     #>direct_flash_progress_text
+            jmp     draw_progress
+
+draw_firmware_receive_progress:
+            ldx     #3
+-           lda     uploaded_size,x
+            sta     progress_current,x
+            lda     file_size,x
+            sta     progress_total,x
+            dex
+            bpl     -
+            lda     #<firmware_receive_progress_text
+            ldx     #>firmware_receive_progress_text
+            jmp     draw_progress
+
+draw_firmware_erase_progress:
+            lda     #<firmware_erase_progress_text
+            ldx     #>firmware_erase_progress_text
+            jmp     draw_progress
+
+draw_firmware_ready_progress:
+            ldx     #3
+-           lda     file_size,x
+            sta     progress_current,x
+            sta     progress_total,x
+            dex
+            bpl     -
+            lda     #<firmware_ready_progress_text
+            ldx     #>firmware_ready_progress_text
+            jmp     draw_progress
 
 ; A/X points to a stage label. progress_current/progress_total are little-endian
 ; byte counts. A zero total renders an activity marker and a scanned-byte count.
@@ -3354,10 +3927,34 @@ progress_select_manager:
 progress_select_export:
             lda     progress_label+1
             cmp     #>export_progress_text
-            bne     progress_return_flash_kind
+            bne     progress_select_firmware
             lda     progress_label
             cmp     #<export_progress_text
             beq     progress_return_export_kind
+progress_select_firmware:
+            lda     progress_label+1
+            cmp     #>firmware_receive_progress_text
+            bne     progress_select_firmware_erase
+            lda     progress_label
+            cmp     #<firmware_receive_progress_text
+            beq     progress_return_firmware_kind
+progress_select_firmware_erase:
+            lda     progress_label+1
+            cmp     #>firmware_erase_progress_text
+            bne     progress_select_firmware_ready
+            lda     progress_label
+            cmp     #<firmware_erase_progress_text
+            beq     progress_return_firmware_kind
+progress_select_firmware_ready:
+            lda     progress_label+1
+            cmp     #>firmware_ready_progress_text
+            bne     progress_return_flash_kind
+            lda     progress_label
+            cmp     #<firmware_ready_progress_text
+            bne     progress_return_flash_kind
+progress_return_firmware_kind:
+            lda     #PROGRESS_KIND_FIRMWARE
+            rts
 progress_return_flash_kind:
             lda     #PROGRESS_KIND_FLASH
             rts
@@ -3391,6 +3988,8 @@ draw_progress_static:
             beq     draw_progress_manager_title
             cmp     #PROGRESS_KIND_EXPORT
             beq     draw_progress_export_title
+            cmp     #PROGRESS_KIND_FIRMWARE
+            beq     draw_progress_firmware_title
             lda     #<progress_flash_title
             ldx     #>progress_flash_title
             bra     draw_progress_title
@@ -3405,6 +4004,10 @@ draw_progress_manager_title:
 draw_progress_export_title:
             lda     #<progress_export_title
             ldx     #>progress_export_title
+            bra     draw_progress_title
+draw_progress_firmware_title:
+            lda     #<progress_firmware_title
+            ldx     #>progress_firmware_title
 draw_progress_title:
             jsr     ui_puts_colored
 
@@ -3445,6 +4048,8 @@ progress_select_status_color:
             lda     progress_modal_kind
             cmp     #PROGRESS_KIND_SCAN
             beq     progress_status_label
+            cmp     #PROGRESS_KIND_FIRMWARE
+            beq     progress_status_firmware
             lda     progress_label+1
             cmp     #>flash_done_progress_text
             bne     progress_status_error
@@ -3457,6 +4062,14 @@ progress_status_error:
 progress_status_success:
             lda     #UI_COLOR_SUCCESS
             rts
+progress_status_firmware:
+            lda     progress_label+1
+            cmp     #>firmware_ready_progress_text
+            bne     progress_status_label
+            lda     progress_label
+            cmp     #<firmware_ready_progress_text
+            beq     progress_status_success
+            bra     progress_status_label
 progress_status_label:
             lda     #UI_COLOR_LABEL
             rts
@@ -5697,6 +6310,7 @@ nonce_done: rts
 
 ; A=command, X=payload length. tx_buffer begins with the request nonce.
 mailbox_command_response:
+            stz     MMU_IO_CTRL
             sta     response_command
             stx     response_request_length
             jsr     drain_rx_fifo
@@ -5739,6 +6353,7 @@ nonce_mismatch:
 
 ; A=command, X=length, payload at ZP_POINTER.
 mailbox_command:
+            stz     MMU_IO_CTRL
             sta     pending_command
             stx     pending_length
             jsr     mailbox_wait_idle
@@ -5856,6 +6471,7 @@ response_bad_count:
             rts
 
 mailbox_wait_online:
+            stz     MMU_IO_CTRL
             ldy     #$ff
 online_outer:
             ldx     #$ff
@@ -6034,7 +6650,7 @@ restart_computer_text: .text "Restarting the K2...",0
 key_bar_text:       .text "Enter",KEY_BAR_TOGGLE," Boot   ",KEY_BAR_TOGGLE,"F3",KEY_BAR_TOGGLE," Copy to flash   ",KEY_BAR_TOGGLE,"F7",KEY_BAR_TOGGLE," Set default   ",KEY_BAR_TOGGLE,"DEL",KEY_BAR_TOGGLE," Delete",0
 local_key_bar_text: .text "Enter",KEY_BAR_TOGGLE," Open   ",KEY_BAR_TOGGLE,"F3",KEY_BAR_TOGGLE," Copy to flash   ",KEY_BAR_TOGGLE,"F5",KEY_BAR_TOGGLE," Copy to RP SD   ",KEY_BAR_TOGGLE,"DEL",KEY_BAR_TOGGLE," Parent directory",0
 catalog_key_bar_text_2: .text "F1",KEY_BAR_TOGGLE," Help   ",KEY_BAR_TOGGLE,"F2",KEY_BAR_TOGGLE," Diagnostics   ",KEY_BAR_TOGGLE,"F5",KEY_BAR_TOGGLE," Copy to K2 SD   ",KEY_BAR_TOGGLE,"Tab",KEY_BAR_TOGGLE," Switch view   ",KEY_BAR_TOGGLE,"Q",KEY_BAR_TOGGLE," Exit",0
-key_bar_text_2:     .text "F1",KEY_BAR_TOGGLE," Help   ",KEY_BAR_TOGGLE,"F2",KEY_BAR_TOGGLE," Diagnostics   ",KEY_BAR_TOGGLE,"Tab",KEY_BAR_TOGGLE," Switch view   ",KEY_BAR_TOGGLE,"Q",KEY_BAR_TOGGLE," Exit",0
+key_bar_text_2:     .text "F1",KEY_BAR_TOGGLE," Help   ",KEY_BAR_TOGGLE,"F2",KEY_BAR_TOGGLE," Diagnostics   ",KEY_BAR_TOGGLE,"U",KEY_BAR_TOGGLE," Firmware update   ",KEY_BAR_TOGGLE,"Tab",KEY_BAR_TOGGLE," Switch   ",KEY_BAR_TOGGLE,"Q",KEY_BAR_TOGGLE," Exit",0
 boot_log_key_bar_text: .text "RUN/STOP",KEY_BAR_TOGGLE," Close",0
 local_target_text:  .text "Copy destination: RP2040 SD, context ",0
 local_no_manager_sd_text: .text "No RP2040 SD card. Flash context ",0
@@ -6045,6 +6661,13 @@ install_done_text:  .text "Copied to RP2040 SD.",0
 direct_flash_text:  .text "Writing core to flash. Do not turn off the K2.",0
 direct_flash_done_text: .text "Core written to flash.",0
 direct_flash_unavailable_text: .text "Select a gzip core no larger than 2 MiB.",0
+firmware_update_unavailable_text: .text "Select a .k2fw package in the Local SD view and press U.",0
+firmware_stage_text: .text "Staging FPGA Manager firmware. Do not turn off the K2.",0
+firmware_staged_text: .text "Firmware is staged. Press U when ready to restart and apply it.",0
+firmware_apply_text: .text "Restarting FPGA Manager to install the verified update...",0
+firmware_ready_prompt_text: .text "FPGA Manager firmware is ready to install.",0
+firmware_restart_warning_text: .text "The RP2040 will restart; the current core will reload.",0
+firmware_confirm_text: .text "Press Y to install; RUN/STOP leaves it staged.",0
 flash_copy_text:    .text "Copying from RP2040 SD to flash. Do not turn off the K2.",0
 flash_copy_done_text: .text "Core written to flash.",0
 export_start_text:  .text "Copying to K2 SD. Do not turn off the K2.",0
@@ -6058,6 +6681,7 @@ progress_scan_title:.text "Validating image",0
 progress_manager_title: .text "Installing to manager SD",0
 progress_flash_title:.text "Installing to flash",0
 progress_export_title:.text "Copying to K2 SD",0
+progress_firmware_title:.text "Updating FPGA Manager",0
 progress_cancel_hint:.text "RUN/STOP Cancel",0
 progress_locked_hint:.text "Keys locked until complete",0
 scan_progress_text: .text "Scanning image and calculating CRC...",0
@@ -6069,6 +6693,9 @@ flash_finalize_progress_text: .text "Do not power off - verifying flash",0
 flash_done_progress_text: .text "Flash copy complete",0
 flash_failed_progress_text: .text "Flash copy failed",0
 export_progress_text: .text "Do not power off",0
+firmware_receive_progress_text: .text "Receiving update - do not power off",0
+firmware_erase_progress_text: .text "Preparing staging - do not power off",0
+firmware_ready_progress_text: .text "Update verified and staged",0
 progress_separator_text: .text " / ",0
 progress_percent_text: .text "%   ",0
 progress_kib_text:  .text " KiB",0
@@ -6174,6 +6801,10 @@ ui_help_layout:
             .word help_key_f5
             .byte 41,18,UI_COLOR_NORMAL
             .word help_local_f5
+            .byte 42,8,UI_COLOR_ORANGE
+            .word help_key_u
+            .byte 42,18,UI_COLOR_NORMAL
+            .word help_local_u
             .byte $ff
 
 help_section_global:  .text "Global",0
@@ -6188,6 +6819,7 @@ help_key_f8:          .text "F8",0
 help_key_tab:         .text "Tab",0
 help_key_s:           .text "S",0
 help_key_q:           .text "Q",0
+help_key_u:           .text "U",0
 help_key_break:       .text "RUN/STOP",0
 help_key_up_down:     .text "Up/Down",0
 help_key_left_right:  .text "Left/Right",0
@@ -6212,6 +6844,7 @@ help_local_enter:     .text "Open directory",0
 help_local_delete:    .text "Parent directory",0
 help_local_f3:        .text "Copy gzip core to flash",0
 help_local_f5:        .text "Copy core to manager SD",0
+help_local_u:         .text "Install a .k2fw FPGA Manager update",0
 
 ; Wildbits CI palette used by the Core Manager design template.
 ui_text_palette:
@@ -6233,10 +6866,6 @@ ui_line_hi:
 ; Workspace
 ; ---------------------------------------------------------------------------
 
-            .align $100
-tx_buffer:          .fill 240,0
-            .align $100
-response_buffer:    .fill 240,0
 event_buffer:       .fill 16,0
 catalog_generation: .fill 4,0
 nonce:              .fill 4,0
@@ -6341,7 +6970,6 @@ decimal_digit:      .byte 0
 decimal_width:      .byte 0
 decimal_padding_start: .byte 0
 delete_path_length: .byte 0
-delete_path:        .fill 192,0
 chunk_length:       .byte 0
 header_count:       .byte 0
 begin_length:       .byte 0
@@ -6354,13 +6982,8 @@ remote_upload_size: .fill 4,0
 crc_value:          .fill 4,0
 image_header:       .fill 10,0
 file_tail:          .fill 8,0
-local_path:         .fill 128,0
-filename:           .fill 128,0
-install_name:       .fill LOCAL_ENTRY_NAME_MAX+1,0
 ; Directory event names can occupy the full one-byte length range even when
 ; they are too long for the visible 62-character cache entry.
-local_trash:        .fill 256,0
-begin_payload:      .fill LOCAL_ENTRY_NAME_MAX+12,0
-io_buffer:          .fill MAX_PAYLOAD,0
 
+core_manager_end:
             .cerror * > $c000, "K2 Core Manager overlaps the video buffer"

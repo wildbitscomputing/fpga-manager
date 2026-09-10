@@ -1,0 +1,16 @@
+/* Generated per board revision.  Do not assemble this template directly. */
+.section .firmware_image, "a", %progbits
+.balign 4096
+.global firmware_factory_image_start
+.global firmware_factory_image_end
+firmware_factory_image_start:
+.incbin "@FIRMWARE_PACKAGE_PATH@"
+firmware_factory_image_end:
+
+.section .firmware_journal, "a", %progbits
+.balign 4096
+.global firmware_factory_journal_start
+.global firmware_factory_journal_end
+firmware_factory_journal_start:
+.incbin "@FIRMWARE_JOURNAL_PATH@"
+firmware_factory_journal_end:

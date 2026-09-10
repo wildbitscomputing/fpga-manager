@@ -126,12 +126,13 @@ browser. The most important controls are:
 | `S` | Save the selected entry as default and run it |
 | `F2` | Display the RP2040 boot and fallback log |
 | `F8` | Restart the RP2040 and repeat FPGA loading |
+| `U` | From the local SD view, install a board-specific `.k2fw` FPGA Manager update |
 | Q | Restart the K2 through the FPGA host-reset registers |
 | RUN/STOP | Close Help or Diagnostics; cancel image validation |
 
-Catalog markers are `>` for the cursor, `*` for the saved default, and `+` for
-the core that actually booted. See [k2/README.md](k2/README.md) for the more
-details.
+Catalog markers are an amber triangle for the cursor, a green check for the
+saved default, and an orange dot for the core that actually booted. See
+[k2/README.md](k2/README.md) for more details.
 
 ## Safety and validation
 
@@ -161,7 +162,7 @@ file:
 
 | Board | BOOTSEL | SWD |
 | --- | --- | --- |
-| Purple board and Wilbits boards | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
+| Purple board and Wildbits boards | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
 | Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
 
 The release package's `K2-FPGA-MANAGER.pdf` contains the installation guide,
@@ -169,6 +170,16 @@ operating reference, and recovery procedures.
 The UF2 and ELF include the same supervisor firmware and matching immutable
 recovery core, shared by contexts 1 and 4. They do not overwrite the four
 replaceable slots.
+
+These factory images introduce the protected first-stage loader and must be
+installed once through BOOTSEL or SWD when migrating from older firmware.
+They initialize the separate firmware-update journal but preserve core boot
+metadata and all replaceable FPGA slots.
+After that migration, normal releases can be installed in-system: copy the
+matching `.k2fw` package to the K2 SD card, select it in the Core Manager's
+Local SD view, and press `U`. The update does not require the optional RP2040
+SD card. See [the firmware-update design](docs/rp2040-firmware-updates.md) for
+the flash layout and rollback guarantees.
 
 ## Building
 
@@ -192,10 +203,20 @@ just build-k2-core-manager
 just package-release
 ```
 
-The main build produces board-qualified `.uf2`, `.elf`, and `.bin` files in
-`build/`. The optional `_with_fpga.uf2` target also initializes context 1's
-replaceable flash slot with the recovery core; the normal firmware already
-contains its own immutable copy.
+The main build produces board-qualified factory/recovery `.uf2`, `.elf`, and
+`.bin` files in `build/`. It also produces board-qualified `.k2fw` application
+packages and internally linked `fpga_mgr_app_*` artifacts. Use the factory UF2
+or ELF for the one-time loader migration and for recovery; after that,
+`k2coremgr.pgz` can install matching `.k2fw` packages in-system. The optional
+`_with_fpga.uf2` target also initializes context 1's replaceable flash slot
+with the recovery core; the normal firmware already contains its own immutable
+copy.
+
+Run the package-format and cross-language image-validation tests with:
+
+```sh
+just test-firmware-packages
+```
 
 The project version in `CMakeLists.txt` is the source of truth for UF2 metadata,
 the mailbox firmware version, and the release ZIP name. Release builds keep USB
@@ -234,7 +255,7 @@ version-by-version protocol changelog.
 - `k2/`: interactive manager and standalone uploader for the 65816
 - `release/README.md`: end-user installation and quick-reference guide
 - `docs/core-bundles-and-loader.md`: future bundle/loader architecture notes
-- `docs/rp2040-firmware-updates.md`: failure-safe in-system firmware update plan
+- `docs/rp2040-firmware-updates.md`: failure-safe in-system firmware update design and implementation
 
 The firmware is distributed under the BSD 3-Clause License. The portions of
 the K2 interface adapted from PEXEC retain their MIT notice in
