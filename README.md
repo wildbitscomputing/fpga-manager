@@ -10,6 +10,19 @@ interface. From the K2 itself it can browse cores on either SD card, copy them
 between cards, install gzip images into replaceable flash, choose the next boot
 core, inspect the boot log, and start a core without changing the saved default.
 
+## Hardware revisions
+
+K2 hardware was produced by Wildbits and by Foenix Retro Systems (FRS). The
+firmware target is determined by the revision printed on the PCB:
+
+| Hardware | Revision |
+| --- | --- |
+| Wildbits K2 or FRS purple board | RevB0C |
+| Earlier FRS black prototype board | RevB3B |
+
+The Wildbits PCB is also black, so color alone does not distinguish it from an
+FRS black board. Use the printed revision when choosing firmware.
+
 ## What a context represents
 
 The K2 has four hardware contexts selected by the physical DIP switches. A
@@ -54,8 +67,8 @@ original K2 context layout; it does not consume a second copy of the image.
 
 The embedded image is the board-specific K2 2x core shared by contexts 1 and 4:
 
-- `fpga/B0C/context1.gz` for RevB0C hardware (also known as purple board)
-- `fpga/B3B/context1.gz` for RevB3B hardware (the old prototype boards, aka black board)
+- `fpga/B0C/context1.gz` for RevB0C hardware
+- `fpga/B3B/context1.gz` for RevB3B hardware
 
 The two FPGA bitstreams are not interchangeable and are clearly marked in the
 releases as two separate versions.
@@ -160,10 +173,10 @@ Release packages contain separate UF2 and ELF files for the two board
 revisions. Check the revision of your K2 PCB and use only the matching
 file:
 
-| Board | BOOTSEL | SWD |
+| PCB revision | BOOTSEL | SWD |
 | --- | --- | --- |
-| Purple board and Wildbits boards | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
-| Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
+| RevB0C | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
+| RevB3B | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
 
 The release package's `K2-FPGA-MANAGER.pdf` contains the installation guide,
 operating reference, and recovery procedures.

@@ -13,6 +13,91 @@ context, and an embedded recovery core shared by contexts 1 and 4. The K2
 utility also sees the computer's normal SD card and can copy images in either
 direction.
 
+## Hardware variants
+
+K2 hardware was produced by Wildbits and by Foenix Retro Systems (FRS). The
+firmware target is determined by the revision printed on the PCB:
+
+| Hardware | Revision |
+| --- | --- |
+| Wildbits K2 or FRS purple board | RevB0C |
+| Earlier FRS black prototype board | RevB3B |
+
+The Wildbits PCB is also black, so color alone does not distinguish it from an
+FRS black board. Use the printed revision when choosing firmware. RevB0C and
+RevB3B use different FPGA interfaces and their firmware is not interchangeable.
+
+## Package contents
+
+| File | Purpose |
+| --- | --- |
+| `K2-FPGA-MANAGER.pdf` | This installation and operating guide. |
+| `fpga_mgr_B0C.uf2` / `.elf` | RevB0C factory firmware for BOOTSEL or SWD installation. |
+| `fpga_mgr_B3B.uf2` / `.elf` | RevB3B factory firmware for BOOTSEL or SWD installation. |
+| `fpga_mgr_B0C_<version>.k2fw` | RevB0C in-system FPGA Manager update. |
+| `fpga_mgr_B3B_<version>.k2fw` | RevB3B in-system FPGA Manager update. |
+| `k2coremgr.pgz` | Interactive K2 Core Manager application. |
+| `LICENSE` | Project license. |
+
+Both factory variants contain the same supervisor software and the matching K2
+FPGA 02020105 2x core as the recovery environment for contexts 1 and 4. They do
+not overwrite the four replaceable FPGA flash slots. The recovery payload is
+stored only once in the RP2040 firmware.
+
+Do not install firmware intended for the other board revision. The RP2040 will
+still start, but its embedded recovery core will not produce working video.
+
+The UF2 and ELF in this release include the protected first-stage loader. A K2
+running older firmware must install the matching factory image once through
+BOOTSEL or SWD. The `.k2fw` files update only the normal application and cannot
+replace or damage that loader. Factory flashing also resets the dedicated
+firmware-update journal so it is a reliable recovery operation, while leaving
+core boot selections and the four replaceable FPGA slots alone.
+
+## Install the supervisor firmware
+
+### Through RP2040 BOOTSEL
+
+1. Connect a USB cable with Dupont connectors to the internal RP2040 header in
+   the K2 and connect the other end to a PC or Mac.
+2. Hold the small BOOTSEL button next to the board connector while powering up
+   the K2. The host should mount an `RPI-RP2` USB drive.
+3. Copy the matching `fpga_mgr_B0C.uf2` or `fpga_mgr_B3B.uf2` to that drive.
+4. Wait for the copy to finish and for the drive to disappear. The supervisor
+   restarts and loads the FPGA according to the physical context switches and
+   saved boot policy.
+
+### With an SWD probe
+
+Use this method when the internal BOOTSEL connection is damaged or the host
+does not recognize the USB device. Connect a CMSIS-DAP probe, such as the
+Raspberry Pi Debug Probe, to RP2040 SWDIO, SWCLK, and GND. From a command prompt
+configured for the Raspberry Pi Pico SDK's OpenOCD installation, run the
+command matching the board revision:
+
+```text
+openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" -c "program fpga_mgr_B0C.elf verify reset exit"
+```
+
+or:
+
+```text
+openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" -c "program fpga_mgr_B3B.elf verify reset exit"
+```
+
+## Install and start the K2 Core Manager
+
+Copy `k2coremgr.pgz` to the K2's normal SD card and launch it as a PGZ program:
+
+```text
+/- k2coremgr
+```
+
+The running FPGA core must implement the RP2040 supervisor mailbox. The bundled
+recovery core does. If the current core does not, the utility reports that the
+supervisor is offline; press a key to restart the K2, select context 1 or 4,
+and start the manager from the recovery environment.
+
 ## What is a context?
 
 The K2 has four hardware contexts selected by the physical DIP switches. A
@@ -78,87 +163,6 @@ file data cross the FPGA mailbox link to the RP2040, which owns its separate
 SD card and QSPI flash. At boot, or when a core is started from the manager,
 the RP2040 sends the selected image back through the FPGA configuration
 interface.
-
-## Package contents
-
-| File | Purpose |
-| --- | --- |
-| `K2-FPGA-MANAGER.pdf` | This installation and operating guide. |
-| `fpga_mgr_B0C.uf2` / `.elf` | Supervisor firmware for a Wildbits or purple RevB0C board. |
-| `fpga_mgr_B3B.uf2` / `.elf` | Supervisor firmware for a black RevB3B board. |
-| `fpga_mgr_B0C_<version>.k2fw` | In-system FPGA Manager update for RevB0C. |
-| `fpga_mgr_B3B_<version>.k2fw` | In-system FPGA Manager update for RevB3B. |
-| `k2coremgr.pgz` | Interactive K2 Core Manager application. |
-| `LICENSE` | Project license. |
-
-## Choose the correct firmware
-
-Check the hardware revision of the K2 board before programming it.
-The two FPGA interfaces are not electrically interchangeable.
-
-| Board revision | BOOTSEL image | SWD image |
-| --- | --- | --- |
-| Wildbits board and purple board | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
-| Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
-
-Both variants contain the same supervisor software and the matching K2 FPGA
-02020105 2x core as the recovery environment for contexts 1 and 4. Installing
-the firmware does not overwrite the four replaceable FPGA flash slots. The
-recovery payload is stored only once in the RP2040 firmware.
-
-Do not install firmware intended for the other board revision. The RP2040 will
-still start, but its embedded recovery core will not produce working video.
-
-The UF2 and ELF in this release include the protected first-stage loader. A K2
-running older firmware must install the matching factory image once through
-BOOTSEL or SWD. The `.k2fw` files update only the normal application and cannot
-replace or damage that loader. Factory flashing also resets the dedicated
-firmware-update journal so it is a reliable recovery operation, while leaving
-core boot selections and the four replaceable FPGA slots alone.
-
-## Install the supervisor firmware
-
-### Through RP2040 BOOTSEL
-
-1. Connect a USB cable with Dupont connectors to the internal RP2040 header in
-   the K2 and connect the other end to a PC or Mac.
-2. Hold the small BOOTSEL button next to the board connector while powering up
-   the K2. The host should mount an `RPI-RP2` USB drive.
-3. Copy the matching `fpga_mgr_B0C.uf2` or `fpga_mgr_B3B.uf2` to that drive.
-4. Wait for the copy to finish and for the drive to disappear. The supervisor
-   restarts and loads the FPGA according to the physical context switches and
-   saved boot policy.
-
-### With an SWD probe
-
-Use this method when the internal BOOTSEL connection is damaged or the host
-does not recognize the USB device. Connect a CMSIS-DAP probe, such as the
-Raspberry Pi Debug Probe, to RP2040 SWDIO, SWCLK, and GND. From a command prompt
-configured for the Raspberry Pi Pico SDK's OpenOCD installation, run the
-command matching the board revision:
-
-```text
-openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" -c "program fpga_mgr_B0C.elf verify reset exit"
-```
-
-or:
-
-```text
-openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" -c "program fpga_mgr_B3B.elf verify reset exit"
-```
-
-## Install and start the K2 Core Manager
-
-Copy `k2coremgr.pgz` to the K2's normal SD card and launch it as a PGZ program:
-
-```text
-/- k2coremgr
-```
-
-The running FPGA core must implement the RP2040 supervisor mailbox. The bundled
-recovery core does. If the current core does not, the utility reports that the
-supervisor is offline; press a key to restart the K2, select context 1 or 4,
-and start the manager from the recovery environment.
 
 ## Core storage and selection
 
@@ -235,12 +239,11 @@ be prepared before changing the switches.
 In the catalog, press `F5` on an RP2040-SD image, the replaceable `FLASH`
 image, or `GOLDEN`. The image is copied to the last directory visited in the
 local-SD browser, or to the root directory if that browser has not yet been
-used. The transfer verifies byte count and CRC-32; flash readback must also
-match the CRC recorded when that slot was programmed. The transfer is written
-and verified under a hidden `.part` name. An existing destination is held as a
-hidden rollback copy during publication rather than being deleted first. The
-progress dialog shows the intended K2-SD path, which is reopened after the
-final rename before the manager reports success.
+used. The manager verifies byte count and CRC-32; flash readback must also match
+the CRC recorded when the slot was programmed. It stages the transfer under a
+hidden `.part` name, keeps an existing destination as a rollback copy, and
+reopens the final path before reporting success. The progress dialog shows the
+intended K2-SD path.
 
 ### Remove an RP2040-SD core
 
@@ -254,15 +257,14 @@ boot. Flash and embedded-recovery entries cannot be deleted this way.
 After the one-time loader migration, copy the `.k2fw` matching the physical
 board revision to the K2 local SD card. Open it in the local-SD browser and
 press `U`. The manager verifies the file shape, streams it into a fixed staging
-slot, and shows erase and receive progress. The RP2040 checks the board ID,
-loader compatibility, manifest CRC, flash readback, vectors, and payload
-SHA-256 before committing the pending update.
+slot, and shows progress. Before committing the update, the RP2040 checks the
+board ID, loader compatibility, manifest CRC, flash readback, vectors, and
+payload SHA-256.
 
 Press `Y` at the final prompt to restart the RP2040 and install it. `RUN/STOP`
 leaves the verified candidate staged; press `U` later to return to the prompt.
 Because the pending update is already committed, any intervening RP2040
-restart will install it.
-The old application is preserved as rollback, and an eight-second startup
+restart will install it. The old application is preserved as rollback, and an eight-second startup
 watchdog automatically restores it if the candidate cannot load an FPGA and
 bring up the supervisor mailbox. The optional RP2040 SD card is not used by
 this update path.
@@ -297,7 +299,6 @@ RESET signal while the RP2040 starts. When the system is already running, holdin
 RESET for five seconds restarts the RP2040; keep RESET held through that restart
 to request recovery.
 
-Press `F2` in the manager to inspect the most recent boot and reconfiguration
-decisions. The log records the saved policy, each SD/flash/recovery attempt,
-validation failures, fallback decisions, and the image that ultimately loaded.
-It retains up to 32 messages in RAM and is cleared when the RP2040 restarts.
+Press `F2` to inspect the latest 32 boot and reconfiguration messages. The RAM
+log records the saved policy, boot attempts, validation failures, fallbacks,
+and loaded image; it is cleared when the RP2040 restarts.
