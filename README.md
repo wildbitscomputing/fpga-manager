@@ -10,6 +10,19 @@ interface. From the K2 itself it can browse cores on either SD card, copy them
 between cards, install gzip images into replaceable flash, choose the next boot
 core, inspect the boot log, and start a core without changing the saved default.
 
+## Hardware revisions
+
+K2 hardware was produced by Wildbits and by Foenix Retro Systems (FRS). The
+firmware target is determined by the revision printed on the PCB:
+
+| Hardware | Revision |
+| --- | --- |
+| Wildbits K2 or FRS purple board | RevB0C |
+| Earlier FRS black prototype board | RevB3B |
+
+The Wildbits PCB is also black, so color alone does not distinguish it from an
+FRS black board. Use the printed revision when choosing firmware.
+
 ## What a context represents
 
 The K2 has four hardware contexts selected by the physical DIP switches. A
@@ -54,8 +67,8 @@ original K2 context layout; it does not consume a second copy of the image.
 
 The embedded image is the board-specific K2 2x core shared by contexts 1 and 4:
 
-- `fpga/B0C/context1.gz` for RevB0C hardware (also known as purple board)
-- `fpga/B3B/context1.gz` for RevB3B hardware (the old prototype boards, aka black board)
+- `fpga/B0C/context1.gz` for RevB0C hardware
+- `fpga/B3B/context1.gz` for RevB3B hardware
 
 The two FPGA bitstreams are not interchangeable and are clearly marked in the
 releases as two separate versions.
@@ -69,7 +82,7 @@ compatibility.
 1. Set the physical context switches to context 1.
 2. Restart the computer. If the saved context-1 sources are suspect, keep RESET
    held through the restart to force the embedded recovery core.
-3. Run `k2coremgr.pgz`.
+3. Run `k2coremgr.pgz`, or use the equivalent two-block `coremgr.kup` build.
 4. Use Left/Right to inspect another context. Copy a core from the local K2 SD
    with `F5`, program its flash slot with `F3`, or save a new default with
    `F7`.
@@ -112,8 +125,8 @@ copy does not replace the previous destination.
 
 ## Using the K2 application
 
-`k2coremgr.pgz` opens the RP2040 catalog. `Tab` switches to the K2's local SD
-browser. The most important controls are:
+`k2coremgr.pgz` and `coremgr.kup` open the RP2040 catalog. `Tab` switches to
+the K2's local SD browser. The most important controls are:
 
 | Key | Action |
 | --- | --- |
@@ -160,10 +173,10 @@ Release packages contain separate UF2 and ELF files for the two board
 revisions. Check the revision of your K2 PCB and use only the matching
 file:
 
-| Board | BOOTSEL | SWD |
+| PCB revision | BOOTSEL | SWD |
 | --- | --- | --- |
-| Purple board and Wildbits boards | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
-| Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
+| RevB0C | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
+| RevB3B | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
 
 The release package's `K2-FPGA-MANAGER.pdf` contains the installation guide,
 operating reference, and recovery procedures.
@@ -207,7 +220,7 @@ The main build produces board-qualified factory/recovery `.uf2`, `.elf`, and
 `.bin` files in `build/`. It also produces board-qualified `.k2fw` application
 packages and internally linked `fpga_mgr_app_*` artifacts. Use the factory UF2
 or ELF for the one-time loader migration and for recovery; after that,
-`k2coremgr.pgz` can install matching `.k2fw` packages in-system. The optional
+the K2 Core Manager can install matching `.k2fw` packages in-system. The optional
 `_with_fpga.uf2` target also initializes context 1's replaceable flash slot
 with the recovery core; the normal firmware already contains its own immutable
 copy.

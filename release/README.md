@@ -6,105 +6,43 @@ It consists of two cooperating programs:
 | Component | Purpose |
 | --- | --- |
 | RP2040 supervisor firmware | Loads the FPGA at startup, maintains the core catalog and saved boot selections, programs replaceable flash, and records fallback diagnostics. |
-| `k2coremgr.pgz` | K2 Core Manager application for browsing, copying, programming, selecting, and starting FPGA cores. |
+| `k2coremgr.pgz` / `coremgr.kup` | PGZ and two-block KUP builds of the K2 FPGA Core Manager application. |
 
 The supervisor can use cores on its own SD card, one replaceable flash slot per
 context, and an embedded recovery core shared by contexts 1 and 4. The K2
 utility also sees the computer's normal SD card and can copy images in either
 direction.
 
-## What is a context?
+## Hardware variants
 
-The K2 has four hardware contexts selected by the physical DIP switches. A
-context selects both an FPGA core and one 512 KiB slice of the K2's 2 MiB NOR
-flash. The FPGA core defines the machine's hardware, while the associated NOR
-slice contains the firmware or operating environment visible in that context.
-Changing context can therefore change the identity of the computer, not just
-the program it starts.
+K2 hardware was produced by Wildbits and by Foenix Retro Systems (FRS). The
+firmware target is determined by the revision printed on the PCB:
 
-For example, the K2 currently has a 65816-based 2x core and a 6809 core intended
-for NitrOS-9. Each can occupy its own context, use its own NOR contents, and
-boot as a distinct computer. Further K2-oriented cores can use the other
-contexts in the same way.
+| Hardware | Revision |
+| --- | --- |
+| Wildbits K2 or FRS purple board | RevB0C |
+| Earlier FRS black prototype board | RevB3B |
 
-Because the DIP switches also select the NOR slice, this is a physical machine
-selection. The manager can prepare another context, but it cannot switch the
-running K2 into it entirely in software. Change the switches and restart the K2
-to use another context.
-
-## How the pieces connect
-
-```mermaid
-flowchart LR
-    subgraph CPU_DOMAIN["65816 SOFTWARE"]
-        CPU["65816 CPU<br/>runs k2coremgr.pgz"]
-    end
-
-    subgraph FPGA_DOMAIN["K2 FPGA HARDWARE"]
-        direction TB
-        FPGA["FPGA<br/>active core + mailbox"]
-        CONFIG["FPGA configuration<br/>interface"]
-        K2SD["K2 local SD<br/>PGZ programs + core files"]
-        CONFIG --> FPGA
-        FPGA <-->|SD interface| K2SD
-    end
-
-    subgraph RP_DOMAIN["RP2040 SUPERVISOR"]
-        direction TB
-        RP["RP2040<br/>supervisor firmware"]
-        FLASH["QSPI flash<br/>firmware + slots"]
-        RPSD["RP2040 SD<br/>CNTX1...CNTX4"]
-        RP <--> FLASH
-        RP <--> RPSD
-    end
-
-    CPU <-->|host bus| FPGA
-    FPGA <-->|runtime mailbox| RP
-    RP -->|selected core| CONFIG
-
-    classDef software fill:#eaf5ef,stroke:#245a78,color:#14213d
-    classDef hardware fill:#e8f0f5,stroke:#245a78,color:#14213d
-    classDef supervisor fill:#fff3d6,stroke:#245a78,color:#14213d
-    classDef storage fill:#f1f3f5,stroke:#245a78,color:#14213d
-    class CPU software
-    class FPGA,CONFIG hardware
-    class RP supervisor
-    class K2SD,FLASH,RPSD storage
-```
-
-`k2coremgr.pgz` runs on the 65816, the K2 SD card is attached to the FPGA
-and is exposed to the program through the running core. Manager commands and
-file data cross the FPGA mailbox link to the RP2040, which owns its separate
-SD card and QSPI flash. At boot, or when a core is started from the manager,
-the RP2040 sends the selected image back through the FPGA configuration
-interface.
+The Wildbits PCB is also black, so color alone does not distinguish it from an
+FRS black board. Use the printed revision when choosing firmware. RevB0C and
+RevB3B use different FPGA interfaces and their firmware is not interchangeable.
 
 ## Package contents
 
 | File | Purpose |
 | --- | --- |
 | `K2-FPGA-MANAGER.pdf` | This installation and operating guide. |
-| `fpga_mgr_B0C.uf2` / `.elf` | Supervisor firmware for a Wildbits or purple RevB0C board. |
-| `fpga_mgr_B3B.uf2` / `.elf` | Supervisor firmware for a black RevB3B board. |
-| `fpga_mgr_B0C_<version>.k2fw` | In-system FPGA Manager update for RevB0C. |
-| `fpga_mgr_B3B_<version>.k2fw` | In-system FPGA Manager update for RevB3B. |
-| `k2coremgr.pgz` | Interactive K2 Core Manager application. |
+| `fpga_mgr_B0C.uf2` / `.elf` | RevB0C factory firmware for BOOTSEL or SWD installation. |
+| `fpga_mgr_B3B.uf2` / `.elf` | RevB3B factory firmware for BOOTSEL or SWD installation. |
+| `fpga_mgr_B0C_<version>.k2fw` | RevB0C in-system FPGA Manager update. |
+| `fpga_mgr_B3B_<version>.k2fw` | RevB3B in-system FPGA Manager update. |
+| `k2coremgr.pgz` / `coremgr.kup` | Equivalent PGZ and two-block KUP builds of the interactive K2 FPGA Core Manager. |
 | `LICENSE` | Project license. |
 
-## Choose the correct firmware
-
-Check the hardware revision of the K2 board before programming it.
-The two FPGA interfaces are not electrically interchangeable.
-
-| Board revision | BOOTSEL image | SWD image |
-| --- | --- | --- |
-| Wildbits board and purple board | `fpga_mgr_B0C.uf2` | `fpga_mgr_B0C.elf` |
-| Black board | `fpga_mgr_B3B.uf2` | `fpga_mgr_B3B.elf` |
-
-Both variants contain the same supervisor software and the matching K2 FPGA
-02020105 2x core as the recovery environment for contexts 1 and 4. Installing
-the firmware does not overwrite the four replaceable FPGA flash slots. The
-recovery payload is stored only once in the RP2040 firmware.
+Both factory variants contain the same supervisor software and the matching K2
+FPGA 02020105 2x core as the recovery environment for contexts 1 and 4. They do
+not overwrite the four replaceable FPGA flash slots. The recovery payload is
+stored only once in the RP2040 firmware.
 
 Do not install firmware intended for the other board revision. The RP2040 will
 still start, but its embedded recovery core will not produce working video.
@@ -149,16 +87,86 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" 
 
 ## Install and start the K2 Core Manager
 
-Copy `k2coremgr.pgz` to the K2's normal SD card and launch it as a PGZ program:
+Copy `k2coremgr.pgz` or `coremgr.kup` to the K2's normal SD card. The PGZ
+build can be launched as:
 
 ```text
 /- k2coremgr
 ```
 
+The KUP build contains the same program in two contiguous 8 KiB blocks and can
+instead be opened with a KUP-aware DOS or PEXEC launcher as `coremgr.kup`.
+
 The running FPGA core must implement the RP2040 supervisor mailbox. The bundled
 recovery core does. If the current core does not, the utility reports that the
 supervisor is offline; press a key to restart the K2, select context 1 or 4,
 and start the manager from the recovery environment.
+
+## What is a context?
+
+The K2 has four hardware contexts selected by the physical DIP switches. A
+context selects both an FPGA core and one 512 KiB slice of the K2's 2 MiB NOR
+flash. The FPGA core defines the machine's hardware, while the associated NOR
+slice contains the firmware or operating environment visible in that context.
+Changing context can therefore change the identity of the computer, not just
+the program it starts.
+
+For example, the K2 currently has a 65816-based 2x core and a 6809 core intended
+for NitrOS-9. Each can occupy its own context, use its own NOR contents, and
+boot as a distinct computer. Further K2-oriented cores can use the other
+contexts in the same way.
+
+Because the DIP switches also select the NOR slice, this is a physical machine
+selection. The manager can prepare another context, but it cannot switch the
+running K2 into it entirely in software. Change the switches and restart the K2
+to use another context.
+
+## How the pieces connect
+
+```mermaid
+flowchart LR
+    subgraph CPU_DOMAIN["65816 SOFTWARE"]
+        CPU["65816 CPU<br/>runs K2 Core Manager"]
+    end
+
+    subgraph FPGA_DOMAIN["K2 FPGA HARDWARE"]
+        direction TB
+        FPGA["FPGA<br/>active core + mailbox"]
+        CONFIG["FPGA configuration<br/>interface"]
+        K2SD["K2 local SD<br/>programs + core files"]
+        CONFIG --> FPGA
+        FPGA <-->|SD interface| K2SD
+    end
+
+    subgraph RP_DOMAIN["RP2040 SUPERVISOR"]
+        direction TB
+        RP["RP2040<br/>supervisor firmware"]
+        FLASH["QSPI flash<br/>firmware + slots"]
+        RPSD["RP2040 SD<br/>CNTX1...CNTX4"]
+        RP <--> FLASH
+        RP <--> RPSD
+    end
+
+    CPU <-->|host bus| FPGA
+    FPGA <-->|runtime mailbox| RP
+    RP -->|selected core| CONFIG
+
+    classDef software fill:#eaf5ef,stroke:#245a78,color:#14213d
+    classDef hardware fill:#e8f0f5,stroke:#245a78,color:#14213d
+    classDef supervisor fill:#fff3d6,stroke:#245a78,color:#14213d
+    classDef storage fill:#f1f3f5,stroke:#245a78,color:#14213d
+    class CPU software
+    class FPGA,CONFIG hardware
+    class RP supervisor
+    class K2SD,FLASH,RPSD storage
+```
+
+The K2 Core Manager runs on the 65816, the K2 SD card is attached to the FPGA
+and is exposed to the program through the running core. Manager commands and
+file data cross the FPGA mailbox link to the RP2040, which owns its separate
+SD card and QSPI flash. At boot, or when a core is started from the manager,
+the RP2040 sends the selected image back through the FPGA configuration
+interface.
 
 ## Core storage and selection
 
@@ -235,12 +243,11 @@ be prepared before changing the switches.
 In the catalog, press `F5` on an RP2040-SD image, the replaceable `FLASH`
 image, or `GOLDEN`. The image is copied to the last directory visited in the
 local-SD browser, or to the root directory if that browser has not yet been
-used. The transfer verifies byte count and CRC-32; flash readback must also
-match the CRC recorded when that slot was programmed. The transfer is written
-and verified under a hidden `.part` name. An existing destination is held as a
-hidden rollback copy during publication rather than being deleted first. The
-progress dialog shows the intended K2-SD path, which is reopened after the
-final rename before the manager reports success.
+used. The manager verifies byte count and CRC-32; flash readback must also match
+the CRC recorded when the slot was programmed. It stages the transfer under a
+hidden `.part` name, keeps an existing destination as a rollback copy, and
+reopens the final path before reporting success. The progress dialog shows the
+intended K2-SD path.
 
 ### Remove an RP2040-SD core
 
@@ -254,15 +261,14 @@ boot. Flash and embedded-recovery entries cannot be deleted this way.
 After the one-time loader migration, copy the `.k2fw` matching the physical
 board revision to the K2 local SD card. Open it in the local-SD browser and
 press `U`. The manager verifies the file shape, streams it into a fixed staging
-slot, and shows erase and receive progress. The RP2040 checks the board ID,
-loader compatibility, manifest CRC, flash readback, vectors, and payload
-SHA-256 before committing the pending update.
+slot, and shows progress. Before committing the update, the RP2040 checks the
+board ID, loader compatibility, manifest CRC, flash readback, vectors, and
+payload SHA-256.
 
 Press `Y` at the final prompt to restart the RP2040 and install it. `RUN/STOP`
 leaves the verified candidate staged; press `U` later to return to the prompt.
 Because the pending update is already committed, any intervening RP2040
-restart will install it.
-The old application is preserved as rollback, and an eight-second startup
+restart will install it. The old application is preserved as rollback, and an eight-second startup
 watchdog automatically restores it if the candidate cannot load an FPGA and
 bring up the supervisor mailbox. The optional RP2040 SD card is not used by
 this update path.
@@ -297,7 +303,6 @@ RESET signal while the RP2040 starts. When the system is already running, holdin
 RESET for five seconds restarts the RP2040; keep RESET held through that restart
 to request recovery.
 
-Press `F2` in the manager to inspect the most recent boot and reconfiguration
-decisions. The log records the saved policy, each SD/flash/recovery attempt,
-validation failures, fallback decisions, and the image that ultimately loaded.
-It retains up to 32 messages in RAM and is cleared when the RP2040 restarts.
+Press `F2` to inspect the latest 32 boot and reconfiguration messages. The RAM
+log records the saved policy, boot attempts, validation failures, fallbacks,
+and loaded image; it is cleared when the RP2040 restarts.
