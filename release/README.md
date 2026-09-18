@@ -6,7 +6,7 @@ It consists of two cooperating programs:
 | Component | Purpose |
 | --- | --- |
 | RP2040 supervisor firmware | Loads the FPGA at startup, maintains the core catalog and saved boot selections, programs replaceable flash, and records fallback diagnostics. |
-| `k2coremgr.pgz` | K2 Core Manager application for browsing, copying, programming, selecting, and starting FPGA cores. |
+| `k2coremgr.pgz` / `coremgr.kup` | PGZ and two-block KUP builds of the K2 FPGA Core Manager application. |
 
 The supervisor can use cores on its own SD card, one replaceable flash slot per
 context, and an embedded recovery core shared by contexts 1 and 4. The K2
@@ -36,7 +36,7 @@ RevB3B use different FPGA interfaces and their firmware is not interchangeable.
 | `fpga_mgr_B3B.uf2` / `.elf` | RevB3B factory firmware for BOOTSEL or SWD installation. |
 | `fpga_mgr_B0C_<version>.k2fw` | RevB0C in-system FPGA Manager update. |
 | `fpga_mgr_B3B_<version>.k2fw` | RevB3B in-system FPGA Manager update. |
-| `k2coremgr.pgz` | Interactive K2 Core Manager application. |
+| `k2coremgr.pgz` / `coremgr.kup` | Equivalent PGZ and two-block KUP builds of the interactive K2 FPGA Core Manager. |
 | `LICENSE` | Project license. |
 
 Both factory variants contain the same supervisor software and the matching K2
@@ -87,11 +87,15 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "adapter speed 5000" 
 
 ## Install and start the K2 Core Manager
 
-Copy `k2coremgr.pgz` to the K2's normal SD card and launch it as a PGZ program:
+Copy `k2coremgr.pgz` or `coremgr.kup` to the K2's normal SD card. The PGZ
+build can be launched as:
 
 ```text
 /- k2coremgr
 ```
+
+The KUP build contains the same program in two contiguous 8 KiB blocks and can
+instead be opened with a KUP-aware DOS or PEXEC launcher as `coremgr.kup`.
 
 The running FPGA core must implement the RP2040 supervisor mailbox. The bundled
 recovery core does. If the current core does not, the utility reports that the
@@ -122,14 +126,14 @@ to use another context.
 ```mermaid
 flowchart LR
     subgraph CPU_DOMAIN["65816 SOFTWARE"]
-        CPU["65816 CPU<br/>runs k2coremgr.pgz"]
+        CPU["65816 CPU<br/>runs K2 Core Manager"]
     end
 
     subgraph FPGA_DOMAIN["K2 FPGA HARDWARE"]
         direction TB
         FPGA["FPGA<br/>active core + mailbox"]
         CONFIG["FPGA configuration<br/>interface"]
-        K2SD["K2 local SD<br/>PGZ programs + core files"]
+        K2SD["K2 local SD<br/>programs + core files"]
         CONFIG --> FPGA
         FPGA <-->|SD interface| K2SD
     end
@@ -157,7 +161,7 @@ flowchart LR
     class K2SD,FLASH,RPSD storage
 ```
 
-`k2coremgr.pgz` runs on the 65816, the K2 SD card is attached to the FPGA
+The K2 Core Manager runs on the 65816, the K2 SD card is attached to the FPGA
 and is exposed to the program through the running core. Manager commands and
 file data cross the FPGA mailbox link to the RP2040, which owns its separate
 SD card and QSPI flash. At boot, or when a core is started from the manager,

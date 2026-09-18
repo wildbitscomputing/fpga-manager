@@ -117,6 +117,7 @@ def main() -> None:
             f"fpga_mgr_B3B_{version}.k2fw",
         ),
         (ROOT / "k2" / "k2coremgr.pgz", "k2coremgr.pgz"),
+        (ROOT / "k2" / "coremgr.kup", "coremgr.kup"),
         (ROOT / "LICENSE", "LICENSE"),
     )
 

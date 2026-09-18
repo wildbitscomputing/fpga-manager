@@ -1,6 +1,7 @@
 # K2 Core Manager
 
-`k2coremgr.pgz` is the interactive K2 Core Manager. It obtains the image
+`k2coremgr.pgz` and `coremgr.kup` are the PGZ and two-block KUP builds of the
+interactive K2 FPGA Core Manager. They obtain the image
 catalog directly from the RP2040, including files on the manager's
 configuration SD card, the replaceable flash slot, and the embedded recovery
 image when browsing context 1 or 4. Both contexts expose the same immutable
@@ -15,6 +16,10 @@ Build and launch it from the development host with:
 make -C k2 core-manager
 just run-k2-core-manager
 ```
+
+The build produces both formats from the same source. The KUP image occupies
+two contiguous 8 KiB blocks at `$8000-$BFFF`; the host-side run command uses
+the PGZ image.
 
 ## K2 Core Manager controls
 

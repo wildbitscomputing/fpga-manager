@@ -19,6 +19,7 @@ fpga/*.gz
 !fpga/B3B/*.gz
 k2/*.bin
 k2/*.pgz
+k2/*.kup
 k2/*.lst
 foenixmgr.ini
 *.xlsx

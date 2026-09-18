@@ -82,7 +82,7 @@ compatibility.
 1. Set the physical context switches to context 1.
 2. Restart the computer. If the saved context-1 sources are suspect, keep RESET
    held through the restart to force the embedded recovery core.
-3. Run `k2coremgr.pgz`.
+3. Run `k2coremgr.pgz`, or use the equivalent two-block `coremgr.kup` build.
 4. Use Left/Right to inspect another context. Copy a core from the local K2 SD
    with `F5`, program its flash slot with `F3`, or save a new default with
    `F7`.
@@ -125,8 +125,8 @@ copy does not replace the previous destination.
 
 ## Using the K2 application
 
-`k2coremgr.pgz` opens the RP2040 catalog. `Tab` switches to the K2's local SD
-browser. The most important controls are:
+`k2coremgr.pgz` and `coremgr.kup` open the RP2040 catalog. `Tab` switches to
+the K2's local SD browser. The most important controls are:
 
 | Key | Action |
 | --- | --- |
@@ -220,7 +220,7 @@ The main build produces board-qualified factory/recovery `.uf2`, `.elf`, and
 `.bin` files in `build/`. It also produces board-qualified `.k2fw` application
 packages and internally linked `fpga_mgr_app_*` artifacts. Use the factory UF2
 or ELF for the one-time loader migration and for recovery; after that,
-`k2coremgr.pgz` can install matching `.k2fw` packages in-system. The optional
+the K2 Core Manager can install matching `.k2fw` packages in-system. The optional
 `_with_fpga.uf2` target also initializes context 1's replaceable flash slot
 with the recovery core; the normal firmware already contains its own immutable
 copy.

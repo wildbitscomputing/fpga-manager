@@ -17,6 +17,7 @@ CORE_MGR_AUTOTEST_DELETE = 0
 CORE_MGR_AUTOTEST_GOLDEN_ONCE = 0
 CORE_MGR_AUTOTEST_CONTEXT = 0
 CORE_MGR_LOCAL_DRIVE = 0
+CORE_MGR_KUP = 0
             .endweak
 
 KERNEL_NEXT_EVENT       = $ff00
@@ -306,6 +307,18 @@ CRC_TABLE3              = $3300
 CATALOG_ENTRIES         = $3400
 
 *           = $8000
+
+            .if CORE_MGR_KUP != 0
+            .byte   $f2,$56             ; KUP signature
+            .byte   2                   ; two contiguous 8 KiB blocks
+            .byte   4                   ; mount in slots 4-5 at $8000-$bfff
+            .word   RUN
+            .byte   1                   ; header version
+            .fill   3,0
+            .text   "coremgr",0
+            .text   0                   ; no arguments
+            .text   "K2 FPGA Core Manager",0
+            .endif
 
 RUN:
             sep     #$30
@@ -6987,3 +7000,6 @@ file_tail:          .fill 8,0
 
 core_manager_end:
             .cerror * > $c000, "K2 Core Manager overlaps the video buffer"
+            .if CORE_MGR_KUP != 0
+            .fill   $c000-*,0           ; KUP stores complete 8 KiB blocks
+            .endif
