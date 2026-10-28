@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "boot_config.h"
+#include "core_flash.h"
 #include "boot_log.h"
 #include "ff.h"
 #include "fpga_manager_version.h"
@@ -16,6 +17,7 @@
 #include "hardware/pio.h"
 #include "hardware/sync.h"
 #include "miniz.h"
+#include "manager_sd.h"
 #include "pico/stdlib.h"
 #include "rp2040_firmware_storage.h"
 #include "supervisor_spi.pio.h"
@@ -77,20 +79,11 @@ constexpr uint8_t kTargetSdRaw = 0;
 constexpr uint8_t kTargetFlashGzip = 2;
 constexpr uint8_t kTargetSdNamed = 3;
 constexpr uint32_t kFpgaImageSize = 9730652u;
-constexpr uint32_t kFlashSlotSize = 2u * 1024u * 1024u;
-constexpr uint32_t kCopyEraseStep = 64u * 1024u;
+constexpr uint32_t kFlashSlotSize = core_store::kCapacity;
+constexpr uint32_t kCopyEraseStep = core_store::kBlockSize;
 constexpr unsigned kCopyBlocksPerStep = 8;
 constexpr size_t kReadSdChunkSize = kMaxPayload - 8;
 constexpr uint32_t kMaxSdGzipSize = kFpgaImageSize + 64u * 1024u;
-constexpr uintptr_t kXipBase = 0x10000000u;
-constexpr uint32_t kMutableFlashStart = 8u * 1024u * 1024u;
-constexpr uint32_t kMutableFlashEnd = 16u * 1024u * 1024u;
-constexpr uint32_t kFlashSlotOffsets[] = {
-    0x00800000u, 0x00A00000u, 0x00C00000u, 0x00E00000u
-};
-static_assert(kFlashSlotOffsets[0] == kMutableFlashStart, "mutable bank start changed");
-static_assert(kFlashSlotOffsets[3] + kFlashSlotSize == kMutableFlashEnd,
-              "mutable bank must remain inside the upper 8 MiB");
 
 constexpr const char* kImagePaths[] = {
     "0:/CNTX1/context1.bin",
@@ -126,6 +119,7 @@ enum Error : uint8_t {
     kErrorReadPosition = 0x27,
     kErrorContextMismatch = 0x28,
     kErrorFirmwareUpdate = 0x30,
+    kErrorFlashNoSpace = 0x31,
 };
 
 enum ImageFormat : uint8_t {
@@ -172,7 +166,6 @@ uint8_t response[kFrameSize];
 uint32_t tx_words[kFrameSize];
 uint32_t rx_words[kFrameSize];
 
-bool sd_available = false;
 uint8_t physical_context = 0;
 bool upload_active = false;
 uint8_t upload_target = 0;
@@ -184,10 +177,8 @@ mz_ulong upload_crc = MZ_CRC32_INIT;
 FIL upload_file;
 bool upload_file_open = false;
 uint8_t flash_page[FLASH_PAGE_SIZE];
-uint8_t flash_first_page[FLASH_PAGE_SIZE];
 size_t flash_page_used = 0;
 uint32_t flash_write_offset = 0;
-bool flash_first_page_pending = false;
 uint8_t upload_header[10];
 size_t upload_header_used = 0;
 uint8_t upload_tail[8];
@@ -202,6 +193,7 @@ bool copy_source_open = false;
 FIL sd_read_source;
 CatalogReadSource catalog_read_source = CatalogReadSource::None;
 const uint8_t* memory_read_source = nullptr;
+uint8_t flash_read_slot = 0;
 bool catalog_read_crc_expected = false;
 uint32_t catalog_read_expected_crc = 0;
 uint32_t sd_read_size = 0;
@@ -374,10 +366,9 @@ bool add_catalog_entry(BootSource source, ImageFormat format, uint32_t size,
 
 bool flash_slot_has_gzip(uint8_t context)
 {
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(
-        kXipBase + kFlashSlotOffsets[context]);
-    return data[0] == 0x1f && data[1] == 0x8b && data[2] == 8 &&
-           (data[3] & 0xe0) == 0;
+    uint8_t data[4];
+    return core_flash_read(context, 0, data, sizeof(data)) &&
+        data[0] == 0x1f && data[1] == 0x8b && data[2] == 8 && (data[3] & 0xe0) == 0;
 }
 
 bool valid_sd_selection_path(uint8_t context, const char* path)
@@ -422,7 +413,7 @@ void rebuild_catalog(uint8_t context)
                       golden ? "Automatic (SD, flash, golden)"
                              : "Automatic (SD, flash)");
 
-    if (sd_available) {
+    if (manager_sd_mount()) {
         char directory[16];
         std::snprintf(directory, sizeof(directory), "CNTX%u",
                       static_cast<unsigned>(context + 1));
@@ -479,17 +470,17 @@ void rebuild_catalog(uint8_t context)
         }
     }
 
-    if (flash_slot_has_gzip(context)) {
-        FlashSlotInfo slot = boot_config_flash_slot(context);
+    if (flash_slot_has_gzip(context) || core_flash_reserved(context)) {
+        FlashSlotInfo slot = core_flash_info(context);
         char label[kFlashLabelLength];
-        if (slot.valid && slot.label[0]) {
+        if (slot.label[0]) {
             std::snprintf(label, sizeof(label), "%s", slot.label);
         } else {
             std::snprintf(label, sizeof(label), "Flash slot %u (unlabelled)",
                           static_cast<unsigned>(context + 1));
         }
-        add_catalog_entry(BootSource::Flash, kFormatGzip,
-                          slot.valid ? slot.compressed_size : 0, label);
+        add_catalog_entry(BootSource::Flash, core_flash_reserved(context) ? kFormatNone : kFormatGzip,
+                          (slot.valid || core_flash_reserved(context)) ? slot.compressed_size : 0, label);
     }
 
     if (golden) {
@@ -538,7 +529,7 @@ uint8_t status_byte()
     if (upload_active) {
         status |= 0x02;
     }
-    if (sd_available) {
+    if (manager_sd_is_mounted()) {
         status |= 0x04;
     }
     if (upload_active && upload_target == kTargetFlashGzip) {
@@ -675,22 +666,38 @@ void abort_upload()
     } else if (upload_target == kTargetSdNamed && upload_temporary[0]) {
         f_unlink(upload_temporary);
     }
+    core_flash_abort();
     upload_active = false;
     flash_page_used = 0;
-    flash_first_page_pending = false;
 }
 
 bool program_and_verify_flash_page(uint32_t offset, const uint8_t* page)
 {
-    const uint32_t flash_offset = kFlashSlotOffsets[upload_slot] + offset;
-    uint32_t interrupts = save_and_disable_interrupts();
-    flash_range_program(flash_offset, page, FLASH_PAGE_SIZE);
-    restore_interrupts(interrupts);
-
-    const uint8_t* readback = reinterpret_cast<const uint8_t*>(kXipBase + flash_offset);
-    if (std::memcmp(readback, page, FLASH_PAGE_SIZE) != 0) {
+    if (core_flash_write_page(offset, page) != core_store::Result::Ok) {
         last_error = kErrorFlashVerify;
         return false;
+    }
+    return true;
+}
+
+bool allocate_flash_upload()
+{
+    const auto result = core_flash_begin(upload_slot, upload_expected_size, upload_label);
+    if (result != core_store::Result::Ok) {
+        last_error = result == core_store::Result::NoSpace ? kErrorFlashNoSpace : kErrorMetadata;
+        return false;
+    }
+    return true;
+}
+
+bool erase_flash_upload()
+{
+    while (!core_flash_erased()) {
+        if (core_flash_erase_next() != core_store::Result::Ok) {
+            core_flash_abort();
+            last_error = kErrorFlashVerify;
+            return false;
+        }
     }
     return true;
 }
@@ -701,27 +708,9 @@ bool flash_program_page()
         return true;
     }
     std::memset(flash_page + flash_page_used, 0xFF, FLASH_PAGE_SIZE - flash_page_used);
-    if (flash_write_offset == 0) {
-        std::memcpy(flash_first_page, flash_page, FLASH_PAGE_SIZE);
-        flash_first_page_pending = true;
-    } else if (!program_and_verify_flash_page(flash_write_offset, flash_page)) {
-        return false;
-    }
+    if (!program_and_verify_flash_page(flash_write_offset, flash_page)) return false;
     flash_write_offset += FLASH_PAGE_SIZE;
     flash_page_used = 0;
-    return true;
-}
-
-bool flash_commit_first_page()
-{
-    if (!flash_first_page_pending) {
-        last_error = kErrorFlashVerify;
-        return false;
-    }
-    if (!program_and_verify_flash_page(0, flash_first_page)) {
-        return false;
-    }
-    flash_first_page_pending = false;
     return true;
 }
 
@@ -750,7 +739,8 @@ bool uploaded_gzip_shape_valid()
 
 bool begin_upload(const uint8_t* payload, size_t length)
 {
-    if (upload_active || firmware_receive_active()) {
+    if (upload_active || firmware_receive_active() ||
+        catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
     }
@@ -779,7 +769,6 @@ bool begin_upload(const uint8_t* payload, size_t length)
     upload_crc = MZ_CRC32_INIT;
     flash_page_used = 0;
     flash_write_offset = 0;
-    flash_first_page_pending = false;
     upload_header_used = 0;
     upload_destination[0] = '\0';
     upload_temporary[0] = '\0';
@@ -798,7 +787,7 @@ bool begin_upload(const uint8_t* payload, size_t length)
     }
 
     if (upload_target == kTargetSdRaw) {
-        if (!sd_available) {
+        if (!manager_sd_mount()) {
             last_error = kErrorBadTarget;
             return false;
         }
@@ -814,7 +803,7 @@ bool begin_upload(const uint8_t* payload, size_t length)
         }
         upload_file_open = true;
     } else if (upload_target == kTargetSdNamed) {
-        if (!sd_available) {
+        if (!manager_sd_mount()) {
             last_error = kErrorBadTarget;
             return false;
         }
@@ -846,9 +835,7 @@ bool begin_upload(const uint8_t* payload, size_t length)
             last_error = kErrorFlashSize;
             return false;
         }
-        uint32_t interrupts = save_and_disable_interrupts();
-        flash_range_erase(kFlashSlotOffsets[upload_slot], kFlashSlotSize);
-        restore_interrupts(interrupts);
+        if (!allocate_flash_upload() || !erase_flash_upload()) return false;
     } else {
         last_error = kErrorBadTarget;
         return false;
@@ -991,10 +978,8 @@ bool finish_upload()
     } else if (upload_target == kTargetSdNamed) {
         ok = finish_named_sd_upload();
     } else {
-        ok = flash_program_page() && flash_commit_first_page();
-        if (ok && !boot_config_set_flash_slot(upload_slot, upload_size,
-                                               upload_expected_crc,
-                                               upload_label)) {
+        ok = flash_program_page();
+        if (ok && core_flash_commit(upload_expected_crc) != core_store::Result::Ok) {
             last_error = kErrorMetadata;
             ok = false;
         }
@@ -1024,11 +1009,12 @@ void fail_incremental_copy(uint8_t error)
 
 bool begin_incremental_sd_to_flash_copy(uint8_t context, const char* path)
 {
-    if (upload_active || firmware_receive_active()) {
+    if (upload_active || firmware_receive_active() ||
+        catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
     }
-    if (!sd_available || context >= kBootContextCount ||
+    if (!manager_sd_mount() || context >= kBootContextCount ||
         !valid_sd_selection_path(context, path) ||
         !ends_with_casefold(path, ".gz")) {
         last_error = kErrorBadSelection;
@@ -1062,12 +1048,12 @@ bool begin_incremental_sd_to_flash_copy(uint8_t context, const char* path)
     upload_crc = MZ_CRC32_INIT;
     flash_page_used = 0;
     flash_write_offset = 0;
-    flash_first_page_pending = false;
     upload_header_used = 0;
     std::memset(upload_header, 0, sizeof(upload_header));
     std::memset(upload_tail, 0, sizeof(upload_tail));
     std::snprintf(upload_label, sizeof(upload_label), "%s", basename);
 
+    if (!allocate_flash_upload()) { close_copy_source(); return false; }
     upload_active = true;
     copy_state = kCopyErasing;
     copy_error = kErrorNone;
@@ -1079,22 +1065,13 @@ bool begin_incremental_sd_to_flash_copy(uint8_t context, const char* path)
 void step_incremental_sd_to_flash_copy()
 {
     if (copy_state == kCopyErasing) {
-        if (copy_erase_offset == kFlashSlotSize) {
+        if (core_flash_erased()) {
             copy_state = kCopyWriting;
             return;
         }
-        const uint32_t offset = kFlashSlotOffsets[upload_slot] + copy_erase_offset;
-        uint32_t interrupts = save_and_disable_interrupts();
-        flash_range_erase(offset, kCopyEraseStep);
-        restore_interrupts(interrupts);
-
-        const uint8_t* readback = reinterpret_cast<const uint8_t*>(
-            kXipBase + offset);
-        for (uint32_t i = 0; i < kCopyEraseStep; ++i) {
-            if (readback[i] != 0xff) {
-                fail_incremental_copy(kErrorFlashVerify);
-                return;
-            }
+        if (core_flash_erase_next() != core_store::Result::Ok) {
+            fail_incremental_copy(kErrorFlashVerify);
+            return;
         }
         copy_erase_offset += kCopyEraseStep;
         return;
@@ -1144,7 +1121,7 @@ void prepare_incremental_copy_status(uint32_t nonce, size_t* response_length)
     uint32_t total = upload_expected_size;
     if (copy_state == kCopyErasing) {
         current = copy_erase_offset;
-        total = kFlashSlotSize;
+        total = core_flash_erase_size();
     } else if (copy_state == kCopyWriting ||
                copy_state == kCopyFinalizing || copy_state == kCopyDone ||
                copy_state == kCopyFailed) {
@@ -1157,11 +1134,12 @@ void prepare_incremental_copy_status(uint32_t nonce, size_t* response_length)
 
 bool delete_catalog_sd_image(uint8_t context, const char* path)
 {
-    if (upload_active || firmware_receive_active()) {
+    if (upload_active || firmware_receive_active() ||
+        catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
     }
-    if (!sd_available || context >= kBootContextCount ||
+    if (!manager_sd_mount() || context >= kBootContextCount ||
         !valid_sd_selection_path(context, path)) {
         last_error = kErrorBadSelection;
         return false;
@@ -1231,7 +1209,7 @@ bool begin_catalog_sd_read(uint8_t context, const char* path)
         last_error = kErrorUploadActive;
         return false;
     }
-    if (!sd_available || context >= kBootContextCount ||
+    if (!manager_sd_mount() || context >= kBootContextCount ||
         !valid_sd_selection_path(context, path)) {
         last_error = kErrorBadSelection;
         return false;
@@ -1305,7 +1283,7 @@ bool begin_catalog_flash_read(uint8_t context)
         last_error = kErrorBadSelection;
         return false;
     }
-    const FlashSlotInfo slot = boot_config_flash_slot(context);
+    const FlashSlotInfo slot = core_flash_info(context);
     if (!slot.valid || slot.compressed_size < 18 ||
         slot.compressed_size > kFlashSlotSize) {
         last_error = kErrorSize;
@@ -1313,8 +1291,7 @@ bool begin_catalog_flash_read(uint8_t context)
     }
 
     catalog_read_source = CatalogReadSource::Flash;
-    memory_read_source = reinterpret_cast<const uint8_t*>(
-        kXipBase + kFlashSlotOffsets[context]);
+    flash_read_slot = context;
     start_catalog_read(slot.compressed_size);
     catalog_read_crc_expected = true;
     catalog_read_expected_crc = slot.compressed_crc;
@@ -1354,6 +1331,11 @@ bool read_catalog_data(uint32_t requested_offset, uint8_t requested_count,
     if (catalog_read_source == CatalogReadSource::Sd) {
         count = 0;
         result = f_read(&sd_read_source, sd_read_cache, amount, &count);
+    } else if (catalog_read_source == CatalogReadSource::Flash) {
+        if (!core_flash_read(flash_read_slot, sd_read_offset, sd_read_cache, amount)) {
+            last_error = kErrorCopyRead;
+            return false;
+        }
     } else {
         std::memcpy(sd_read_cache, memory_read_source + sd_read_offset,
                     amount);
@@ -1404,11 +1386,12 @@ bool finish_catalog_read(uint32_t nonce, size_t* response_length)
 bool copy_sd_image_to_flash(uint8_t context, const char* path,
                             uint32_t* copied_size)
 {
-    if (upload_active || firmware_receive_active()) {
+    if (upload_active || firmware_receive_active() ||
+        catalog_read_source != CatalogReadSource::None) {
         last_error = kErrorUploadActive;
         return false;
     }
-    if (!sd_available || context >= kBootContextCount ||
+    if (!manager_sd_mount() || context >= kBootContextCount ||
         !valid_sd_selection_path(context, path) ||
         !ends_with_casefold(path, ".gz")) {
         last_error = kErrorBadSelection;
@@ -1435,7 +1418,6 @@ bool copy_sd_image_to_flash(uint8_t context, const char* path,
     upload_crc = MZ_CRC32_INIT;
     flash_page_used = 0;
     flash_write_offset = 0;
-    flash_first_page_pending = false;
     upload_header_used = 0;
     std::memset(upload_header, 0, sizeof(upload_header));
     std::memset(upload_tail, 0, sizeof(upload_tail));
@@ -1448,9 +1430,10 @@ bool copy_sd_image_to_flash(uint8_t context, const char* path,
     }
     std::snprintf(upload_label, sizeof(upload_label), "%s", basename);
 
-    uint32_t interrupts = save_and_disable_interrupts();
-    flash_range_erase(kFlashSlotOffsets[context], kFlashSlotSize);
-    restore_interrupts(interrupts);
+    if (!allocate_flash_upload() || !erase_flash_upload()) {
+        f_close(&source);
+        return false;
+    }
     upload_active = true;
 
     bool ok = true;
@@ -1586,7 +1569,8 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandReconfigure:
         if (length != 1 || request[kHeaderSize] >= 4) {
             last_error = kErrorBadSlot;
-        } else if (upload_active || firmware_receive_active()) {
+        } else if (upload_active || firmware_receive_active() ||
+                   catalog_read_source != CatalogReadSource::None) {
             last_error = kErrorUploadActive;
         } else if (request[kHeaderSize] != physical_context) {
             last_error = kErrorContextMismatch;
@@ -1699,7 +1683,8 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandReconfigureSelected:
         if (length != 5 || request[kHeaderSize + 4] >= kBootContextCount) {
             last_error = kErrorBadSlot;
-        } else if (upload_active || firmware_receive_active()) {
+        } else if (upload_active || firmware_receive_active() ||
+                   catalog_read_source != CatalogReadSource::None) {
             last_error = kErrorUploadActive;
         } else if (request[kHeaderSize + 4] != physical_context) {
             last_error = kErrorContextMismatch;
@@ -1717,7 +1702,8 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandReconfigureOnce:
         if (length < 7) {
             last_error = kErrorLength;
-        } else if (upload_active || firmware_receive_active()) {
+        } else if (upload_active || firmware_receive_active() ||
+                   catalog_read_source != CatalogReadSource::None) {
             last_error = kErrorUploadActive;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
@@ -1765,7 +1751,8 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandRestartSupervisor:
         if (length != 4) {
             last_error = kErrorLength;
-        } else if (upload_active || firmware_receive_active()) {
+        } else if (upload_active || firmware_receive_active() ||
+                   catalog_read_source != CatalogReadSource::None) {
             last_error = kErrorUploadActive;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
@@ -1779,26 +1766,15 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
     case kCommandClearFlash:
         if (length != 5 || request[kHeaderSize + 4] >= kBootContextCount) {
             last_error = kErrorBadSlot;
-        } else if (upload_active || firmware_receive_active()) {
+        } else if (upload_active || firmware_receive_active() ||
+                   catalog_read_source != CatalogReadSource::None) {
             last_error = kErrorUploadActive;
         } else {
             const uint32_t nonce = read_le32(request + kHeaderSize);
             const uint8_t context = request[kHeaderSize + 4];
-            uint32_t interrupts = save_and_disable_interrupts();
-            flash_range_erase(kFlashSlotOffsets[context], FLASH_SECTOR_SIZE);
-            restore_interrupts(interrupts);
-            bool erased = true;
-            const uint8_t* readback = reinterpret_cast<const uint8_t*>(
-                kXipBase + kFlashSlotOffsets[context]);
-            for (size_t i = 0; i < FLASH_SECTOR_SIZE; ++i) {
-                if (readback[i] != 0xff) {
-                    erased = false;
-                    break;
-                }
-            }
-            if (!erased) {
-                last_error = kErrorFlashVerify;
-            } else if (!boot_config_clear_flash_slot(context)) {
+            if (core_flash_clear(context) != core_store::Result::Ok ||
+                (boot_config_selection(context).source == BootSource::Flash &&
+                 !boot_config_set_selection(context, BootSource::Auto, ""))) {
                 last_error = kErrorMetadata;
             } else {
                 write_le32(command_response, nonce);
@@ -2100,9 +2076,8 @@ bool process_request(SupervisorReconfigureRequest* reconfigure_request)
 
 }  // namespace
 
-void supervisor_service_init(bool sd_mounted, uint8_t active_context)
+void supervisor_service_init(uint8_t active_context)
 {
-    sd_available = sd_mounted;
     physical_context = active_context;
 
     adc_init();

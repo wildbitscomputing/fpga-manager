@@ -68,6 +68,7 @@ EVENT_DIRECTORY_EOF     = $44
 EVENT_DIRECTORY_CLOSED  = $46
 EVENT_DIRECTORY_ERROR   = $48
 EVENT_TYPE              = event_buffer+0
+EVENT_DATA_BUFFER       = event_buffer+1
 EVENT_KEY_RAW           = event_buffer+4
 EVENT_KEY_ASCII         = event_buffer+5
 EVENT_STREAM            = event_buffer+3
@@ -1214,6 +1215,14 @@ command_failure:
             jsr     draw_status
             jmp     menu_loop
 command_failure_generic:
+            lda     mailbox_error
+            cmp     #$31
+            bne     command_failure_code
+            lda     #<flash_no_space_text
+            ldx     #>flash_no_space_text
+            jsr     draw_status
+            jmp     menu_loop
+command_failure_code:
             lda     #<error_text
             ldx     #>error_text
             jsr     draw_status
@@ -2067,7 +2076,15 @@ transfer_data:
             lda     EVENT_STREAM
             cmp     transfer_stream
             bne     transfer_event_loop
+            ; ReadData in older MicroKernels leaves carry set even after a
+            ; successful copy. Its only failure is a missing event buffer:
+            ; check that explicitly, and bound the count before copying.
+            lda     EVENT_DATA_BUFFER
+            beq     transfer_file_failure
             lda     EVENT_FILE_READ_COUNT
+            beq     transfer_file_failure ; zero requests 256 bytes from ReadData
+            cmp     #MAX_PAYLOAD+1
+            bcs     transfer_file_failure
             sta     chunk_length
             sta     KARGS_BUFLEN
             lda     #<io_buffer
@@ -2075,7 +2092,8 @@ transfer_data:
             lda     #>io_buffer
             sta     KARGS_BUF+1
             jsr     KERNEL_READ_DATA
-            bcs     transfer_file_failure
+            ; Ignore only ReadData's unreliable carry. File.Read/File.Close
+            ; failures and FILE_ERROR/FILE_NOT_FOUND events still report E5.
             lda     transfer_phase
             bne     transfer_upload_data
             jsr     scan_chunk
@@ -2832,7 +2850,7 @@ validate_gzip_scan:
             lda     image_header+3
             and     #$e0
             bne     invalid_transfer_image
-            ; Manager SD is not constrained by the 2 MiB flash-slot size.
+            ; Manager SD is not constrained by the 8 MiB flash-pool size.
             lda     file_tail+4
             cmp     #$5c
             bne     invalid_transfer_image
@@ -2847,12 +2865,12 @@ validate_gzip_scan:
             lda     transfer_target
             cmp     #TARGET_FLASH_GZIP
             bne     valid_transfer_image
-            ; Reject oversized direct uploads before IMAGE_BEGIN can erase
-            ; the existing 2 MiB replaceable slot.
+            ; Reject images larger than the 8 MiB shared pool.
+            ; Firmware checks free blocks before erasing any allocation.
             lda     file_size+3
             bne     invalid_transfer_image
             lda     file_size+2
-            cmp     #$20
+            cmp     #$80
             bcc     valid_transfer_image
             bne     invalid_transfer_image
             lda     file_size+1
@@ -6634,6 +6652,7 @@ context_text:       .text "Context ",0
 running_text:       .text "booted context ",0
 offline_text:       .text "FPGA Manager is unavailable.",$0a,0
 version_text:       .text "Unsupported FPGA Manager version $",0
+flash_no_space_text: .text "Not enough free flash. Delete a flash core, then retry.",0
 error_text:         .text "FPGA Manager command failed, error",0
 exit_text:          .text "Press any key to reset the system.",0
 ui_help_title_text: .text "Help - F1   ",0
@@ -6673,7 +6692,7 @@ install_text:       .text "Copying to RP2040 SD. Do not turn off the K2.",0
 install_done_text:  .text "Copied to RP2040 SD.",0
 direct_flash_text:  .text "Writing core to flash. Do not turn off the K2.",0
 direct_flash_done_text: .text "Core written to flash.",0
-direct_flash_unavailable_text: .text "Select a gzip core no larger than 2 MiB.",0
+direct_flash_unavailable_text: .text "Select a gzip core no larger than 8 MiB.",0
 firmware_update_unavailable_text: .text "Select a .k2fw package in the Local SD view and press U.",0
 firmware_stage_text: .text "Staging FPGA Manager firmware. Do not turn off the K2.",0
 firmware_staged_text: .text "Firmware is staged. Press U when ready to restart and apply it.",0

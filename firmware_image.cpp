@@ -106,7 +106,7 @@ ImageValidation validate_firmware_manifest(const uint8_t* slot,
     return ImageValidation::Ok;
 }
 
-ImageValidation validate_firmware_image(const uint8_t* slot,
+ImageValidation validate_firmware_boot(const uint8_t* slot,
                                         BoardRevision expected_board)
 {
     const ImageValidation manifest_result =
@@ -132,6 +132,19 @@ ImageValidation validate_firmware_image(const uint8_t* slot,
         return ImageValidation::BadResetVector;
     }
 
+    return ImageValidation::Ok;
+}
+
+ImageValidation validate_firmware_image(const uint8_t* slot,
+                                        BoardRevision expected_board)
+{
+    const auto result = validate_firmware_boot(slot, expected_board);
+    if (result != ImageValidation::Ok) {
+        return result;
+    }
+    const auto* manifest =
+        reinterpret_cast<const FirmwareImageManifest*>(slot);
+    const uint8_t* payload = slot + kManifestSectorSize;
     uint8_t digest[32];
     sha256(payload, manifest->payload_size, digest);
     if (std::memcmp(digest, manifest->payload_sha256, sizeof(digest)) != 0) {

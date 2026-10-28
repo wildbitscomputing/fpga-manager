@@ -31,7 +31,7 @@ constexpr uint32_t kBootMetadataOffsetA = 0x7fe000u;
 constexpr uint32_t kBootMetadataOffsetB = 0x7ff000u;
 constexpr uint32_t kFpgaSlotsOffset = 0x800000u;
 
-constexpr uint16_t kLoaderAbiVersion = 1;
+constexpr uint16_t kLoaderAbiVersion = 2;
 constexpr uint32_t kSdkVectorOffset = 0x100u;
 
 static_assert(kLoaderOffset + kLoaderSize == kActiveOffset);

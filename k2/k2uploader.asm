@@ -85,7 +85,7 @@ COMMAND_PING            = $01
 
 TARGET_FLASH_GZIP       = $02
 MAX_PAYLOAD             = 240
-FLASH_SLOT_SIZE_2       = $20       ; 2 MiB = $00:20:00:00
+FLASH_POOL_SIZE_2       = $80       ; 8 MiB = $00:80:00:00
 
 ; Expected gzip ISIZE: the uncompressed FPGA bitstream size, 9,730,652
 ; bytes ($00947A5C).
@@ -1026,7 +1026,7 @@ finish_scan:
             and     #$e0                ; reserved gzip flags must be clear
             bne     bad_gzip
 
-            ; Reject zero/oversize files.  Exactly 2 MiB is allowed.
+            ; Reject zero/oversize files.  Exactly 8 MiB is allowed; firmware checks free blocks.
             lda     file_size+0
             ora     file_size+1
             ora     file_size+2
@@ -1035,7 +1035,7 @@ finish_scan:
             lda     file_size+3
             bne     bad_size
             lda     file_size+2
-            cmp     #FLASH_SLOT_SIZE_2
+            cmp     #FLASH_POOL_SIZE_2
             bcc     size_ok
             bne     bad_size
             lda     file_size+1
@@ -1361,7 +1361,7 @@ busy_seen:  clc
             rts
 
 ; Approximately 80 seconds at a 6 MHz CPU in the worst case.  IMAGE_BEGIN
-; may spend several seconds erasing the complete 2 MiB slot.
+; may spend several seconds validating legacy images and erasing allocated blocks.
 mailbox_wait_idle:
             stz     ZP_TIMEOUT0
             stz     ZP_TIMEOUT1
@@ -1443,7 +1443,7 @@ crc_text:           .text "  CRC32: $",0
 open_text:          .text "Could not open image.",$0a,0
 file_error_text:    .text "File I/O failed; upload aborted.",$0a,0
 gzip_text:          .text "Not a valid gzip FPGA image.",$0a,0
-size_text:          .text "Image does not fit in a 2 MiB slot.",$0a,0
+size_text:          .text "Image exceeds the 8 MiB flash pool.",$0a,0
 erase_text:         .text "Erasing slot and uploading (do not power off)...",$0a,0
 mailbox_error_text: .text "Supervisor command failed, error $",0
 mailbox_diag_command_text: .text "Command $",0

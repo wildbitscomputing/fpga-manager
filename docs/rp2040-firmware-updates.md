@@ -45,11 +45,18 @@ The loader is normally immutable: in-system packages never contain or address
 it. Updating the loader itself remains an explicit BOOTSEL or SWD operation.
 Keeping this component small and stable is part of the recovery guarantee.
 
+Firmware 1.17 requires loader ABI 2 and must initially be installed through a
+full UF2/SWD update. After core allocation migration, ABI-1 active, rollback,
+and staging images are rejected. The migration guard and allocation journal
+are outside all firmware update copy/erase ranges. An old factory image would
+replace the loader and bypass this safeguard, so manual downgrade is unsupported.
+
 ## Firmware flash layout
 
-The board has 16 MiB of RP2040 QSPI flash. The upper 8 MiB remains unchanged:
-four 2 MiB replaceable FPGA-image slots at offsets `0x800000`, `0xA00000`,
-`0xC00000`, and `0xE00000`.
+The board has 16 MiB of RP2040 QSPI flash. Firmware 1.17 uses the upper 8 MiB
+as a shared pool of 128 × 64 KiB blocks for four logical FPGA images. Legacy
+fixed slots at `0x800000`, `0xA00000`, `0xC00000`, and `0xE00000` migrate in
+place on the first flash mutation. See the main README for migration details.
 
 The lower 8 MiB becomes:
 
@@ -59,17 +66,20 @@ The lower 8 MiB becomes:
 | `0x010000-0x27FFFF` | 2,496 KiB | Active application slot |
 | `0x280000-0x4EFFFF` | 2,496 KiB | Last-known-good rollback slot |
 | `0x4F0000-0x75FFFF` | 2,496 KiB | Incoming update staging slot |
-| `0x760000-0x7DFFFF` | 512 KiB | Reserved; kept erased |
+| `0x760000-0x7BFFFF` | 384 KiB | Reserved; legacy factory gaps may contain zeros |
+| `0x7C0000-0x7CFFFF` | 64 KiB | Core allocation journal A (first 4 KiB used) |
+| `0x7D0000-0x7DFFFF` | 64 KiB | Core allocation journal B (first 4 KiB used) |
 | `0x7E0000-0x7E0FFF` | 4 KiB | Update journal A |
 | `0x7E1000-0x7E1FFF` | 4 KiB | Update journal B |
-| `0x7E2000-0x7FDFFF` | 112 KiB | Reserved; kept erased |
+| `0x7E2000-0x7EFFFF` | 56 KiB | Reserved; kept erased |
+| `0x7F0000-0x7F0FFF` | 4 KiB | Core allocation compatibility guard (first page used) |
+| `0x7F1000-0x7FDFFF` | 52 KiB | Reserved; kept erased |
 | `0x7FE000-0x7FEFFF` | 4 KiB | Existing boot metadata A |
 | `0x7FF000-0x7FFFFF` | 4 KiB | Existing boot metadata B |
 
 Each application slot starts with one 4 KiB manifest sector. The linked
 application payload follows it. The maximum payload is therefore 2,492 KiB.
-The present board-specific binaries are below 1 MiB, including their recovery
-core. The build must fail if a future image exceeds the slot.
+The board-specific binaries include their embedded recovery core. The build must fail if a future image exceeds the slot.
 
 The normal application is linked for its active physical address. Staging and
 rollback contain byte-for-byte copies of that active-address image; the loader
@@ -185,7 +195,8 @@ The loader recognizes these states:
 
 | State | Meaning | Loader action |
 | --- | --- | --- |
-| `CONFIRMED` or no update | Active is the accepted firmware | Validate and boot active |
+| `CONFIRMED` | Active is the accepted firmware | Check manifest/vectors and boot; hash payload unless FLASH is explicitly selected |
+| No valid journal | Firmware state is unknown | Fully validate active or recover a verified backup |
 | `PENDING` | Staging is valid; active is still old | Copy active to rollback and verify it |
 | `BACKUP_READY` | Rollback is valid | Copy staging to active from the beginning and verify it |
 | `TRIAL` | Candidate was installed but has not confirmed startup | Restore rollback, verify, mark confirmed, and boot it |

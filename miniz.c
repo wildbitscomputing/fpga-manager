@@ -438,7 +438,7 @@ mz_ulong mz_crc32(mz_ulong crc, const mz_uint8 *ptr, size_t buf_len)
     int mz_inflate(mz_streamp pStream, int flush)
     {
         inflate_state *pState;
-        mz_uint n, first_call, decomp_flags = TINFL_FLAG_COMPUTE_ADLER32;
+        mz_uint n, first_call, decomp_flags = 0;
         size_t in_bytes, out_bytes, orig_avail_in;
         tinfl_status status;
 
@@ -450,6 +450,7 @@ mz_ulong mz_crc32(mz_ulong crc, const mz_uint8 *ptr, size_t buf_len)
             return MZ_STREAM_ERROR;
 
         pState = (inflate_state *)pStream->state;
+        /* Raw deflate has no Adler trailer. Wrapped zlib still verifies it. */
         if (pState->m_window_bits > 0)
             decomp_flags |= TINFL_FLAG_PARSE_ZLIB_HEADER;
         orig_avail_in = pStream->avail_in;
