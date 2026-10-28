@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "firmware_image.h"
+#include "core_store.h"
 #include "firmware_update_engine.h"
 #include "firmware_update_layout.h"
 
@@ -447,6 +448,88 @@ bool test_journal_corruption(const std::vector<uint8_t>& old_image,
                   "invalid pending update is cleared safely");
 }
 
+bool test_flash_fast_boot(const std::vector<uint8_t>& old_image,
+                          const std::vector<uint8_t>& candidate,
+                          BoardRevision board)
+{
+    SimulatedFlash installed;
+    installed.load(firmware_update::kActiveOffset, old_image);
+    installed.load(firmware_update::kStagingOffset, candidate);
+    if (!expect(firmware_update::mark_update_pending(installed, board) == StorageResult::Ok,
+                "prepare fast boot test") ||
+        !expect(firmware_update::process_firmware_boot(installed, board, false) == BootDecision::StartActive,
+                "fast policy still installs pending image") ||
+        !expect(state_is(installed, board, UpdateState::Trial), "pending enters trial")) {
+        return false;
+    }
+    SimulatedFlash trial(installed.bytes());
+    if (!expect(firmware_update::process_firmware_boot(trial, board, false) == BootDecision::StartActive,
+                "fast policy still rolls back unconfirmed trial") ||
+        !expect(trial.contains(firmware_update::kActiveOffset, old_image), "trial rolled back")) {
+        return false;
+    }
+    if (!expect(firmware_update::confirm_running_firmware(installed, board) == StorageResult::Ok,
+                "confirm fast boot test image")) {
+        return false;
+    }
+    // Only the confirmed payload hash is omitted. Entry vectors/header remain checked.
+    SimulatedFlash corrupt(installed.bytes());
+    corrupt.damage(firmware_update::kActiveOffset + candidate.size() - 1);
+    const auto before = corrupt.bytes();
+    if (!expect(firmware_update::process_firmware_boot(corrupt, board, false) == BootDecision::StartActive,
+                "confirmed flash boot skips payload hash") ||
+        !expect(corrupt.bytes() == before, "fast boot does not rewrite firmware") ||
+        !expect(firmware_update::process_firmware_boot(corrupt, board) == BootDecision::StartActive,
+                "normal boot detects corruption and recovers") ||
+        !expect(corrupt.contains(firmware_update::kActiveOffset, old_image), "normal boot restores backup")) {
+        return false;
+    }
+    for (bool damage_header : {false, true}) {
+        SimulatedFlash bad_entry(installed.bytes());
+        const auto* manifest = reinterpret_cast<const firmware_update::FirmwareImageManifest*>(candidate.data());
+        const auto offset = damage_header ? 0u :
+            firmware_update::kManifestSectorSize + manifest->vector_offset;
+        bad_entry.damage(firmware_update::kActiveOffset + offset);
+        // Damage the header magic or the high byte of SP to guarantee invalidity.
+        if (!damage_header) {
+            bad_entry.damage(firmware_update::kActiveOffset + offset + 3);
+        }
+        if (!expect(firmware_update::process_firmware_boot(bad_entry, board, false) == BootDecision::StartActive,
+                    "fast boot recovers invalid header/vectors") ||
+            !expect(bad_entry.contains(firmware_update::kActiveOffset, old_image), "invalid entry restored")) {
+            return false;
+        }
+    }
+    SimulatedFlash no_journal;
+    no_journal.load(firmware_update::kActiveOffset, candidate);
+    no_journal.damage(firmware_update::kActiveOffset + candidate.size() - 1);
+    return expect(firmware_update::process_firmware_boot(no_journal, board, false) == BootDecision::EnterUsbRecovery,
+                  "missing journal still requires valid payload");
+}
+
+bool test_pool_firmware_fence(const std::vector<uint8_t>& current, BoardRevision board)
+{
+    auto old = current;
+    auto* manifest = reinterpret_cast<firmware_update::FirmwareImageManifest*>(old.data());
+    manifest->required_loader_abi = 1;
+    manifest->header_crc32 = firmware_update::firmware_manifest_crc32(old.data());
+    SimulatedFlash flash;
+    flash.load(firmware_update::kActiveOffset, old);
+    if (!expect(firmware_update::process_firmware_boot(flash, board, false) == BootDecision::StartActive,
+                "legacy firmware allowed before pool migration")) return false;
+    flash.damage(core_store::kGuardOffset);
+    flash.load(firmware_update::kRollbackOffset, old);
+    flash.load(firmware_update::kStagingOffset, old);
+    if (!expect(firmware_update::process_firmware_boot(flash, board, false) == BootDecision::EnterUsbRecovery,
+                "pool guard rejects old active and old recovery images")) return false;
+    flash.load(firmware_update::kActiveOffset, current);
+    if (!expect(firmware_update::process_firmware_boot(flash, board, false) == BootDecision::StartActive,
+                "pool-capable firmware accepted") ||
+        !expect(firmware_update::mark_update_pending(flash, board) == StorageResult::Error,
+                "downgrade rejected before pending journal")) return false;
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -468,7 +551,9 @@ int main(int argc, char** argv)
     if (board_name != "B0C" && board_name != "B3B") {
         return 2;
     }
-    return test_install_and_confirmation(old_image, candidate, board) &&
+    return test_pool_firmware_fence(candidate, board) &&
+                   test_flash_fast_boot(old_image, candidate, board) &&
+                   test_install_and_confirmation(old_image, candidate, board) &&
                    test_recovery_paths(old_image, candidate, board) &&
                    test_journal_corruption(old_image, candidate, board)
                ? 0

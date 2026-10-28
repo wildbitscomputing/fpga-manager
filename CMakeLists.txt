@@ -4,7 +4,7 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.2.0)
+set(sdkVersion 2.3.0)
 set(toolchainVersion 14_2_Rel1)
 set(picotoolVersion 2.2.0-a4)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
@@ -14,7 +14,7 @@ endif()
 # ====================================================================================
 set(PICO_BOARD pico CACHE STRING "Board type")
 # The loader and application partitions occupy the low 8 MiB of a 16 MiB
-# device. The upper 8 MiB contains four fixed 2 MiB FPGA image slots.
+# device. The upper 8 MiB is a shared pool of 128 allocation blocks.
 set(PICO_FLASH_SIZE_BYTES 16777216 CACHE STRING "Physical flash size")
 
 # Generated Cmake Pico project file
@@ -31,7 +31,7 @@ set(CMAKE_CXX_STANDARD 17)
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(fpga_mgr VERSION 1.16 LANGUAGES C CXX ASM)
+project(fpga_mgr VERSION 1.17 LANGUAGES C CXX ASM)
 
 if(PROJECT_VERSION_MAJOR GREATER 255 OR PROJECT_VERSION_MINOR GREATER 255)
     message(FATAL_ERROR "Supervisor protocol version components must fit in one byte")
@@ -44,6 +44,9 @@ configure_file(
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
+if(PICO_SDK_VERSION_STRING VERSION_LESS "2.3.0")
+    message(FATAL_ERROR "Pico SDK 2.3.0 or newer is required for the firmware partition linker scripts")
+endif()
 
 # Python is part of the normal build now: it creates and validates the
 # manifested application embedded in each factory image.
@@ -142,6 +145,9 @@ set_property(
 option(FPGA_MGR_UART_DEBUG "Mirror manager stdio to the K2 FTDI UART" OFF)
 
 set(FPGA_MGR_SOURCES
+    core_store.cpp
+    core_flash.cpp
+    gzip_inspect.cpp
     boot_config.cpp
     boot_log.cpp
     firmware_image.cpp
@@ -276,6 +282,8 @@ function(add_fpga_manager_factory K2_BOARD_REVISION K2_BOARD_ID)
     set(FPGA_MGR_FACTORY_TARGET fpga_mgr_${K2_BOARD_REVISION})
     add_executable(${FPGA_MGR_FACTORY_TARGET}
         firmware_loader.cpp
+        core_store.cpp
+        boot_config.cpp
         firmware_image.cpp
         firmware_update_engine.cpp
         rp2040_firmware_storage.cpp
@@ -321,54 +329,11 @@ add_custom_target(fpga_mgr DEPENDS fpga_mgr_B0C fpga_mgr_B3B)
 add_custom_target(fpga_mgr_update_packages
     DEPENDS fpga_mgr_B0C_update_package fpga_mgr_B3B_update_package)
 
-set(_PICO_VSCODE_PICOTOOL ${USERHOME}/.pico-sdk/picotool/${picotoolVersion}/picotool/picotool)
-if (EXISTS ${_PICO_VSCODE_PICOTOOL})
-    set(PICOTOOL_EXECUTABLE ${_PICO_VSCODE_PICOTOOL})
-else()
-    unset(PICOTOOL_EXECUTABLE CACHE)
-    unset(PICOTOOL_EXECUTABLE)
-    find_program(PICOTOOL_EXECUTABLE picotool)
-endif()
-
-if (PICOTOOL_EXECUTABLE)
-    foreach(K2_BOARD_REVISION IN LISTS K2_BOARD_REVISIONS)
-        set(FPGA_GZIP_0 ${GOLDEN_${K2_BOARD_REVISION}_CONTEXT1})
-        set(FPGA_UF2_0
-            ${CMAKE_CURRENT_BINARY_DIR}/fpga_slot0_${K2_BOARD_REVISION}.uf2)
-        set(COMBINED_UF2
-            ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_${K2_BOARD_REVISION}_with_fpga.uf2)
-
-        add_custom_command(
-            OUTPUT ${FPGA_UF2_0} ${COMBINED_UF2}
-            COMMAND ${PICOTOOL_EXECUTABLE} uf2 convert --offset 0x10800000 -t bin ${FPGA_GZIP_0} ${FPGA_UF2_0} --family rp2040
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/tools/concat_uf2.py
-                    ${COMBINED_UF2}
-                    ${CMAKE_CURRENT_BINARY_DIR}/fpga_mgr_${K2_BOARD_REVISION}.uf2
-                    ${FPGA_UF2_0}
-            DEPENDS fpga_mgr_${K2_BOARD_REVISION}
-                    ${FPGA_GZIP_0}
-            COMMENT "Building Rev${K2_BOARD_REVISION} combined UF2 with context-1 flash preload"
-            VERBATIM
-        )
-        add_custom_target(fpga_mgr_${K2_BOARD_REVISION}_with_fpga_uf2
-            DEPENDS ${COMBINED_UF2})
-    endforeach()
-    add_custom_target(fpga_mgr_with_fpga_uf2
-        DEPENDS fpga_mgr_B0C_with_fpga_uf2 fpga_mgr_B3B_with_fpga_uf2)
-else()
-    set(_FPGA_UF2_MISSING "")
-    if (NOT PICOTOOL_EXECUTABLE)
-        string(APPEND _FPGA_UF2_MISSING " picotool")
-    endif()
-    message(STATUS
-        "Skipping fpga_mgr_with_fpga_uf2 generation; missing prerequisites:${_FPGA_UF2_MISSING}")
-
-    add_custom_target(fpga_mgr_with_fpga_uf2
-        COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --red
-                "Cannot build fpga_mgr_with_fpga_uf2. Missing prerequisites:${_FPGA_UF2_MISSING}"
-        COMMAND ${CMAKE_COMMAND} -E cmake_echo_color --yellow
-                "Install missing tools, then re-run cmake configure."
-        COMMAND ${CMAKE_COMMAND} -E false
-        VERBATIM
-    )
-endif()
+# A fixed-address preload could overwrite another core's allocated blocks.
+# Provision mutable images through Core Manager instead.
+add_custom_target(fpga_mgr_with_fpga_uf2
+    COMMAND ${CMAKE_COMMAND} -E echo
+        "Fixed-address FPGA preloads are incompatible with the shared pool. Use the normal UF2 and Core Manager."
+    COMMAND ${CMAKE_COMMAND} -E false
+    VERBATIM
+)

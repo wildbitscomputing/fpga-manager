@@ -40,7 +40,7 @@ RevB3B use different FPGA interfaces and their firmware is not interchangeable.
 | `LICENSE` | Project license. |
 
 Both factory variants contain the same supervisor software and the matching K2
-FPGA 02020105 2x core as the recovery environment for contexts 1 and 4. They do
+FPGA 02020112 2x core as the recovery environment for contexts 1 and 4. They do
 not overwrite the four replaceable FPGA flash slots. The recovery payload is
 stored only once in the RP2040 firmware.
 
@@ -184,7 +184,15 @@ another context.
 | K2 local SD | Programs and core files visible to the 65816. The manager uses it to import images to, or export images from, the RP2040 SD card. |
 
 RP2040-SD cores may be raw `.bin` files or gzip `.gz` files. Replaceable flash
-accepts gzip images only, and the compressed file must fit in its 2 MiB slot.
+accepts gzip images only. Four logical slots share an 8 MiB pool, allocated
+in 64 KiB blocks. Replacements need free space for the new image while the old
+one remains available; delete an unneeded flash core if error `$31` appears.
+
+Firmware 1.17 requires one full UF2 install to update the loader to ABI 2.
+Legacy cores migrate in place on the first flash upload or deletion. The new
+loader prevents incompatible application downgrades after migration. Do not
+install older factory UF2s or fixed-address FPGA preload images on a migrated
+device.
 
 ## Keyboard reference
 
@@ -300,7 +308,7 @@ recovery.
 
 To force the immutable recovery image, select context 1 or 4 and hold the K2
 RESET signal while the RP2040 starts. When the system is already running, holding
-RESET for five seconds restarts the RP2040; keep RESET held through that restart
+RESET for two seconds restarts the RP2040; keep RESET held through that restart
 to request recovery.
 
 Press `F2` to inspect the latest 32 boot and reconfiguration messages. The RAM

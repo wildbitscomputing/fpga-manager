@@ -106,8 +106,10 @@ StorageResult confirm_running_firmware(FirmwareStorage& storage,
 
 // Runs the restartable loader state machine and returns only when an
 // application may be started, recovery is required, or a storage operation
-// was interrupted/failed.
+// was interrupted/failed. Explicit FLASH boots may skip the confirmed active
+// payload hash; manifest/vector checks and all update/recovery hashes remain.
 BootDecision process_firmware_boot(FirmwareStorage& storage,
-                                   BoardRevision board);
+                                   BoardRevision board,
+                                   bool verify_confirmed_payload = true);
 
 }  // namespace firmware_update

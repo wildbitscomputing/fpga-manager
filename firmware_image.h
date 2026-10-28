@@ -70,6 +70,10 @@ uint32_t firmware_manifest_crc32(const uint8_t* manifest_sector);
 ImageValidation validate_firmware_manifest(const uint8_t* manifest_sector,
                                            BoardRevision expected_board);
 
+// Checks the manifest and entry vectors without reading/hashing the payload.
+ImageValidation validate_firmware_boot(const uint8_t* slot,
+                                       BoardRevision expected_board);
+
 ImageValidation validate_firmware_image(const uint8_t* slot,
                                         BoardRevision expected_board);
 

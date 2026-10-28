@@ -47,7 +47,7 @@ The manager works with four physical FPGA contexts and four kinds of storage:
 | RP2040 SD card | Core library, organized as `CNTX1/` through `CNTX4/`. |
 | K2/MicroKernel SD card | The user's normal filesystem and a convenient source or destination for core files. |
 | K2 NOR flash | Four 512 KiB slices selected by the physical context switches. This is separate from the RP2040's flash. |
-| RP2040 flash | One replaceable 2 MiB gzip slot per context, plus firmware and one immutable recovery core shared by contexts 1 and 4. |
+| RP2040 flash | Four logical gzip slots sharing an 8 MiB pool of 64 KiB blocks, plus firmware and one immutable recovery core shared by contexts 1 and 4. |
 
 Each context has an independent saved boot choice. The available choices are:
 
@@ -109,7 +109,11 @@ replaceable flash slots, and contexts 1 and 4 can still use embedded recovery.
 
 Raw `.bin` and gzip-compressed `.bin.gz`/`.gz` cores are accepted from SD. The
 uncompressed FPGA payload must be exactly 9,730,652 bytes. Replaceable flash
-accepts gzip only, and the compressed file must fit in its 2 MiB slot.
+accepts gzip only. The four logical slots share 8 MiB; an individual image may
+use any free 64 KiB blocks, even when they are not contiguous. A replacement
+needs enough free space for the complete new image while its old image remains
+allocated. Error `$31` means more free space is needed: explicitly delete an
+unneeded flash core and retry.
 
 Automatic SD discovery checks, in order:
 
@@ -149,15 +153,42 @@ saved default, and an orange dot for the core that actually booted. See
 
 ## Safety and validation
 
-The manager validates gzip structure, CRC-32, uncompressed size, FPGA `INIT_B`
-behavior, flash page readback, and persistent metadata. Flash uploads erase and
-verify in bounded steps, write the gzip header page last, and commit metadata
-only after the image is complete. An interrupted upload is therefore invalid
-rather than deceptively bootable.
+The manager validates gzip structure, uncompressed size, FPGA `INIT_B`
+behavior, flash page readback, and persistent metadata. Flash uploads write
+unallocated blocks and publish the new block list only after the complete
+upload passes its transport checksum and page-readback checks. Interrupted
+uploads leave the previous core usable. Incremental SD copies erase one
+allocation block per step.
 
-Boot selections and flash labels live in alternating CRC-protected metadata
-sectors. A corrupt or erased journal defaults context 1 to `GOLDEN` and the
-other contexts to `AUTO`. Context 4's `AUTO` path still ends with the shared
+For an explicit `FLASH` selection, confirmed firmware skips the application
+payload SHA-256 at startup; manifest and entry-vector checks remain. Pending
+updates, trial rollback, and recovery still require full verification. Holding
+RESET at loader startup also keeps full verification. SD mounts only when an SD
+boot source, fallback, catalog scan, or file operation needs it. Successful flash
+and golden boots do not initialize SD.
+
+Gzip programming skips the decompressed payload CRC-32 and unused raw-deflate
+Adler-32 calculation. It still checks the gzip header/trailer structure, exact
+output size and FPGA completion status. Legacy fixed-slot boots also check
+erased padding; allocated cores read only their recorded compressed length. Upload/copy CRC
+checks and flash readback verification remain enabled.
+
+Boot timings are reported in microseconds over the console and in Core Manager's
+boot log: loader, application entry to configured core, SD initialization when
+attempted, and gzip input/inflate/transfer/padding/FPGA initialization/completion.
+The inflate timing includes memory-source flash reads and miniz's internal copy;
+transfer timing includes the DMA wait. Totals also include other startup work
+and logging. These are on-device measurements, not predicted boot times.
+
+The loader fast path and loader timing handoff require installing the full
+board-specific UF2 through USB or programming it through SWD. A `.k2fw`
+application update cannot replace the loader; firmware 1.17 requires the full
+installation first to upgrade to loader ABI 2.
+
+Boot selections remain in their original alternating CRC-protected metadata
+sectors. Core labels, lengths, checksums, and block lists have a separate pair
+of allocation journal records. Lost or corrupt boot-selection metadata defaults
+context 1 to `GOLDEN` and the other contexts to `AUTO`. Context 4's `AUTO` path still ends with the shared
 embedded recovery image if its SD and replaceable-flash candidates fail.
 
 The K2 does not route the FPGA `DONE` pin to the RP2040. The manager can prove
@@ -166,6 +197,35 @@ cannot prove that the loaded core reached a useful application state. A core
 that lacks the supervisor mailbox also cannot be managed after it starts.
 The embedded recovery core in context 1 or 4 is the independent way back from
 either case.
+
+## Flash allocation migration
+
+Firmware 1.17 uses loader ABI 2. Install the full board-specific UF2 once to
+upgrade the loader; a `.k2fw` update from an ABI-1 installation is rejected.
+Subsequent compatible firmware updates use `.k2fw` as before.
+
+Existing fixed-slot images remain at their old addresses and continue to boot.
+The first flash upload or deletion validates all four legacy slots, records
+valid gzip lengths/block lists, and releases unused tails. This one-time scan
+can take several seconds. Unrecognized nonempty slots are reserved in full and
+shown in Core Manager for explicit deletion. Migration does not run during an
+unconfirmed trial boot. Firmware partitions and saved boot selections stay put.
+
+Allocation records occupy reserved blocks at `0x7C0000` and `0x7D0000`; a
+persistent compatibility guard occupies `0x7F0000`, beyond the end of legacy
+flat factory images (whose address gaps may contain zeros). After migration, the new
+loader rejects ABI-1 applications, including rollback/staging candidates.
+Manually flashing an old factory UF2 replaces that protection: do not downgrade
+that way or use old fixed-address FPGA preload images on a migrated device.
+Use the sparse factory UF2 for installation; writing a flat factory `.bin`
+across its address gaps would overwrite the allocation journal. SWD programming
+must likewise preserve sectors outside the ELF/UF2 image ranges.
+
+Each metadata commit retains the prior valid record. Before allocating blocks
+again, a checkpoint makes both records describe the current live images, so
+blocks referenced by a surviving fallback record cannot be reused prematurely.
+If both allocation records are lost after migration, writes and fixed-slot
+fallback are disabled; embedded recovery remains available.
 
 ## Installing firmware
 
@@ -196,9 +256,10 @@ the flash layout and rollback guarantees.
 
 ## Building
 
-Prerequisites are the Raspberry Pi Pico SDK, CMake and a build tool. Python 3,
+Prerequisites are Raspberry Pi Pico SDK 2.3.0 or newer, the ARM embedded GCC
+toolchain (including newlib), CMake and a build tool. Python 3,
 Node.js/npm, `picotool`, `64tass`, [`uv`](https://docs.astral.sh/uv/), and
-[`just`](https://github.com/casey/just) support the combined UF2, K2
+[`just`](https://github.com/casey/just) support the UF2, K2
 application, PDF documentation, and release workflows. The first PDF build
 downloads pinned Mermaid CLI and headless-browser versions through `npx`.
 
@@ -220,10 +281,9 @@ The main build produces board-qualified factory/recovery `.uf2`, `.elf`, and
 `.bin` files in `build/`. It also produces board-qualified `.k2fw` application
 packages and internally linked `fpga_mgr_app_*` artifacts. Use the factory UF2
 or ELF for the one-time loader migration and for recovery; after that,
-the K2 Core Manager can install matching `.k2fw` packages in-system. The optional
-`_with_fpga.uf2` target also initializes context 1's replaceable flash slot
-with the recovery core; the normal firmware already contains its own immutable
-copy.
+the K2 Core Manager can install matching `.k2fw` packages in-system. Fixed-address `_with_fpga.uf2` preloads are no longer generated: they could
+overwrite another core in the shared pool. Provision mutable cores through Core
+Manager; the normal firmware already contains its immutable recovery image.
 
 Run the package-format and cross-language image-validation tests with:
 

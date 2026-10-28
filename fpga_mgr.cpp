@@ -16,7 +16,10 @@
 #include "rtc.h"
 //
 #include "boot_config.h"
+#include "core_flash.h"
 #include "boot_log.h"
+#include "boot_timing.h"
+#include "manager_sd.h"
 #include "fpga_manager_version.h"
 #include "fpga_out.pio.h"
 #include "firmware_trial.h"
@@ -141,6 +144,37 @@ static void ensure_manager_sd_context_directories()
     }
 }
 
+static bool manager_sd_attempted = false;
+static bool manager_sd_mounted = false;
+
+bool manager_sd_is_mounted()
+{
+    return manager_sd_mounted;
+}
+
+bool manager_sd_mount()
+{
+    if (manager_sd_attempted) {
+        return manager_sd_mounted;
+    }
+    manager_sd_attempted = true;
+    const auto start = get_absolute_time();
+    sd_card_t* card = sd_get_by_num(0);
+    if (!card) {
+        panic("Invalid SD hardware config");
+    }
+    const FRESULT result = f_mount(&card->fatfs, card->pcName, 1);
+    firmware_trial_watchdog_feed();
+    manager_sd_mounted = result == FR_OK;
+    if (manager_sd_mounted) {
+        ensure_manager_sd_context_directories();
+    }
+    const auto elapsed = absolute_time_diff_us(start, get_absolute_time());
+    printf("SD init: %lld us, FatFs %u\n", elapsed, static_cast<unsigned>(result));
+    boot_logf("SD init: %lld us, result %u", elapsed, static_cast<unsigned>(result));
+    return manager_sd_mounted;
+}
+
 typedef enum {
     FPGA_METHOD_NONE = 0,
     FPGA_METHOD_SD_GZIP,
@@ -165,9 +199,9 @@ fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_
 
 bool program_fpga_from_gz_data(const uint8_t* data, size_t len, bool allow_ff_padding);
 fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice);
-fpga_method_t program_selected_context(uint8_t slot, bool sd_mounted,
+fpga_method_t program_selected_context(uint8_t slot,
                                        bool force_golden);
-fpga_method_t program_transient_context(uint8_t slot, bool sd_mounted,
+fpga_method_t program_transient_context(uint8_t slot,
                                         BootSource source, const char* path);
 bool reset_hold_timer_callback(struct repeating_timer* timer);
 void start_reset_hold_monitor(void);
@@ -437,10 +471,20 @@ static bool find_wildbits_image(const char* dir, const char* suffix, char* out_p
 
 int main()
 {
+    const auto application_start = get_absolute_time();
     // set_sys_clock_khz(266000, true);
     stdio_init_all();
     firmware_trial_watchdog_feed();
     boot_log_reset();
+    if (watchdog_hw->scratch[0] == kLoaderTimingMagic) {
+        boot_logf("Loader: %lu us, flash fast policy %lu",
+                  static_cast<unsigned long>(watchdog_hw->scratch[1]),
+                  static_cast<unsigned long>(watchdog_hw->scratch[2]));
+        printf("Loader: %lu us, flash fast policy %lu\n",
+               static_cast<unsigned long>(watchdog_hw->scratch[1]),
+               static_cast<unsigned long>(watchdog_hw->scratch[2]));
+        watchdog_hw->scratch[0] = 0;
+    }
     boot_logf("Manager Rev%s firmware %s", K2_BOARD_REVISION,
               FPGA_MANAGER_VERSION_STRING);
     {
@@ -476,6 +520,7 @@ int main()
 
     f256k2_context_man_init_io();    // Go Init all the GPIOs I will need
     boot_config_init();
+    core_flash_init();
     firmware_trial_watchdog_feed();
 
     // Holding the active-low system reset for at least 500 ms during manager
@@ -497,29 +542,18 @@ int main()
 
     fpga_method_t method = FPGA_METHOD_NONE;
 
-    // mount the SD card
-    sd_card_t* pSD = sd_get_by_num(0);
-    if (!pSD) {
-        panic("Invalid hardware config, see 'hw_config.c' implementation\n");
-    }
-
-    FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
-    firmware_trial_watchdog_feed();
-
-    bool sd_mounted = (fr == FR_OK);
-    if (sd_mounted) {
-        boot_logf("Manager SD mounted");
-        ensure_manager_sd_context_directories();
-    } else {
-        boot_logf("Manager SD mount failed: %u", static_cast<unsigned>(fr));
-    }
-    method = program_selected_context(dip_switches, sd_mounted, force_golden);
+    // Source selection mounts SD only when it actually tries an SD image.
+    method = program_selected_context(dip_switches, force_golden);
     firmware_trial_watchdog_feed();
 
     if (method == FPGA_METHOD_NONE) {
         panic("No usable FPGA image; select context 1 or 4 for recovery\n");
     }
 
+    const auto application_us = absolute_time_diff_us(application_start, get_absolute_time());
+    boot_logf("App entry to configured: %lld us", application_us);
+    printf("App entry to configured: %lld us; SD %s\n", application_us,
+           manager_sd_attempted ? "attempted" : "skipped");
     // measure programming time
     int64_t fpga_us = absolute_time_diff_us(start, get_absolute_time());
 
@@ -533,7 +567,7 @@ int main()
 
     // Keep clk_sys unchanged so UART baud and other clock-derived peripheral
     // settings remain valid after FPGA programming.
-    supervisor_service_init(sd_mounted, dip_switches);
+    supervisor_service_init(dip_switches);
     const bool was_trial = firmware_trial_active();
     if (!firmware_trial_confirm()) {
         printf("Trial firmware confirmation failed; rollback watchdog remains active\n");
@@ -565,11 +599,11 @@ int main()
                       reconfigure_request.transient ? " (one-shot)" : "");
             fpga_method_t next = reconfigure_request.transient
                 ? program_transient_context(
-                      reconfigure_request.context, sd_mounted,
+                      reconfigure_request.context,
                       static_cast<BootSource>(reconfigure_request.source),
                       reconfigure_request.path)
                 : program_selected_context(
-                      reconfigure_request.context, sd_mounted, false);
+                      reconfigure_request.context, false);
             printf("Runtime reconfigure slot %u%s: %s\n",
                    reconfigure_request.context,
                    reconfigure_request.transient ? " (one-shot)" : "",
@@ -591,6 +625,8 @@ struct gzip_source_t {
     size_t file_pos;
     size_t file_len;
     bool read_error;
+    int pool_slot = -1;
+    uint32_t pool_pos = 0;
 };
 
 static uint32_t read_le32_bytes(const uint8_t* p)
@@ -601,6 +637,14 @@ static uint32_t read_le32_bytes(const uint8_t* p)
 
 static bool gzip_source_read_byte(gzip_source_t* source, uint8_t* out)
 {
+    if (source->pool_slot >= 0) {
+        size_t available;
+        const auto* data = core_flash_span(source->pool_slot, source->pool_pos, &available);
+        if (!data || !available) return false;
+        *out = *data;
+        ++source->pool_pos;
+        return true;
+    }
     if (source->memory) {
         if (source->memory_pos >= source->memory_size) {
             return false;
@@ -630,6 +674,15 @@ static bool gzip_source_read_byte(gzip_source_t* source, uint8_t* out)
 static bool gzip_source_supply(gzip_source_t* source, mz_stream* stream)
 {
     if (stream->avail_in != 0) {
+        return true;
+    }
+    if (source->pool_slot >= 0) {
+        size_t available;
+        const auto* data = core_flash_span(source->pool_slot, source->pool_pos, &available);
+        if (!data || !available) return false;
+        stream->next_in = data;
+        stream->avail_in = available;
+        source->pool_pos += available;
         return true;
     }
     if (source->memory) {
@@ -791,9 +844,42 @@ static bool finish_fpga_programming()
     return true;
 }
 
+// Accumulate timings without printing between chunks (which would perturb DMA).
+// Report failures too, so a failed source followed by a fallback is visible.
+struct GzipBootTiming {
+    uint64_t start = time_us_64();
+    uint64_t input = 0, inflate = 0, transfer = 0, padding = 0, init = 0, finish = 0;
+    bool accepted = false;
+    ~GzipBootTiming()
+    {
+        const auto total = time_us_64() - start;
+        printf("Gzip timing us: total=%llu input=%llu inflate=%llu transfer=%llu "
+               "padding=%llu init=%llu finish=%llu accepted=%u\n",
+               static_cast<unsigned long long>(total),
+               static_cast<unsigned long long>(input),
+               static_cast<unsigned long long>(inflate),
+               static_cast<unsigned long long>(transfer),
+               static_cast<unsigned long long>(padding),
+               static_cast<unsigned long long>(init),
+               static_cast<unsigned long long>(finish), accepted ? 1u : 0u);
+        boot_logf("Gzip us: total %llu, ok %u, CRC skipped",
+                  static_cast<unsigned long long>(total), accepted ? 1u : 0u);
+        boot_logf("Inflate %llu, transfer %llu us",
+                  static_cast<unsigned long long>(inflate),
+                  static_cast<unsigned long long>(transfer));
+        boot_logf("Input %llu, padding %llu us",
+                  static_cast<unsigned long long>(input),
+                  static_cast<unsigned long long>(padding));
+        boot_logf("FPGA init %llu, finish %llu us",
+                  static_cast<unsigned long long>(init),
+                  static_cast<unsigned long long>(finish));
+    }
+};
+
 static bool program_fpga_from_gzip_source(gzip_source_t* source,
                                           bool allow_ff_padding)
 {
+    GzipBootTiming timing;
     if (!gzip_skip_header(source)) {
         printf("gzip header error\n");
         boot_logf("Reject: invalid gzip header");
@@ -808,15 +894,20 @@ static bool program_fpga_from_gzip_source(gzip_source_t* source,
         return false;
     }
 
-    mz_ulong output_crc = MZ_CRC32_INIT;
     uint32_t output_size = 0;
-    if (!f256k2_init_prg_fpga()) {
+    uint64_t stage_start = time_us_64();
+    const bool initialized = f256k2_init_prg_fpga();
+    timing.init += time_us_64() - stage_start;
+    if (!initialized) {
         mz_inflateEnd(&stream);
         return false;
     }
 
     for (;;) {
-        if (!gzip_source_supply(source, &stream)) {
+        stage_start = time_us_64();
+        const bool supplied = gzip_source_supply(source, &stream);
+        timing.input += time_us_64() - stage_start;
+        if (!supplied) {
             printf(source->read_error ? "gzip read failed\n" : "gzip truncated\n");
             boot_logf(source->read_error ? "Reject: gzip read failed"
                                          : "Reject: gzip stream truncated");
@@ -826,7 +917,9 @@ static bool program_fpga_from_gzip_source(gzip_source_t* source,
 
         stream.next_out = Buffer0;
         stream.avail_out = BUFFER_SIZE;
+        stage_start = time_us_64();
         result = mz_inflate(&stream, MZ_NO_FLUSH);
+        timing.inflate += time_us_64() - stage_start;
         size_t produced = BUFFER_SIZE - stream.avail_out;
         if (produced > FPGA_SIZE - output_size) {
             printf("gzip output exceeds FPGA image size\n");
@@ -835,10 +928,12 @@ static bool program_fpga_from_gzip_source(gzip_source_t* source,
             return false;
         }
         if (produced != 0) {
-            output_crc = mz_crc32(output_crc, Buffer0, produced);
             output_size += static_cast<uint32_t>(produced);
-            if (!f256k2_prg_block_fpga(Buffer0,
-                                       static_cast<unsigned int>(produced))) {
+            stage_start = time_us_64();
+            const bool transferred = f256k2_prg_block_fpga(
+                Buffer0, static_cast<unsigned int>(produced));
+            timing.transfer += time_us_64() - stage_start;
+            if (!transferred) {
                 mz_inflateEnd(&stream);
                 return false;
             }
@@ -859,12 +954,8 @@ static bool program_fpga_from_gzip_source(gzip_source_t* source,
                 mz_inflateEnd(&stream);
                 return false;
             }
-            if (read_le32_bytes(trailer) != output_crc) {
-                printf("gzip CRC mismatch\n");
-                boot_logf("Reject: gzip CRC mismatch");
-                mz_inflateEnd(&stream);
-                return false;
-            }
+            // Boot skips the payload CRC32. Keep the trailer/size checks;
+            // upload and copy paths still validate their transport checksums.
             if (read_le32_bytes(trailer + 4) != output_size) {
                 printf("gzip trailer size mismatch\n");
                 boot_logf("Reject: gzip trailer size mismatch");
@@ -880,7 +971,10 @@ static bool program_fpga_from_gzip_source(gzip_source_t* source,
                 mz_inflateEnd(&stream);
                 return false;
             }
-            if (!gzip_trailing_data_ok(source, &stream, allow_ff_padding)) {
+            stage_start = time_us_64();
+            const bool padding_ok = gzip_trailing_data_ok(source, &stream, allow_ff_padding);
+            timing.padding += time_us_64() - stage_start;
+            if (!padding_ok) {
                 printf("unexpected data after gzip member\n");
                 boot_logf(allow_ff_padding
                               ? "Reject: data after gzip member is not erased"
@@ -889,7 +983,10 @@ static bool program_fpga_from_gzip_source(gzip_source_t* source,
                 return false;
             }
             mz_inflateEnd(&stream);
-            return finish_fpga_programming();
+            stage_start = time_us_64();
+            timing.accepted = finish_fpga_programming();
+            timing.finish += time_us_64() - stage_start;
+            return timing.accepted;
         }
         if (result != MZ_OK) {
             printf("inflate failed: %d\n", result);
@@ -1048,8 +1145,16 @@ fpga_method_t program_fpga_from_flash_slot(const fpga_image_info_t* info, uint8_
     printf("Programming from flash (gzip slot %u)\n", (unsigned)(slot));
     boot_logf("Try FLASH slot %u", static_cast<unsigned>(slot + 1));
     const uint8_t* data = reinterpret_cast<const uint8_t*>(info->flash_base);
-    if (program_fpga_from_gz_data(data, FPGA_FLASH_SLOT_SIZE, true)) {
-        FlashSlotInfo flash = boot_config_flash_slot(slot);
+    bool accepted;
+    if (core_flash_dynamic()) {
+        gzip_source_t source{};
+        source.pool_slot = slot;
+        accepted = program_fpga_from_gzip_source(&source, false);
+    } else {
+        accepted = program_fpga_from_gz_data(data, FPGA_FLASH_SLOT_SIZE, true);
+    }
+    if (accepted) {
+        FlashSlotInfo flash = core_flash_info(slot);
         char fallback_label[32];
         snprintf(fallback_label, sizeof(fallback_label), "flash slot %u",
                  static_cast<unsigned>(slot + 1));
@@ -1087,7 +1192,7 @@ fpga_method_t program_fpga_from_golden_slot(unsigned char sw_choice)
     return FPGA_METHOD_NONE;
 }
 
-static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
+static fpga_method_t program_context_selection(uint8_t slot,
                                                const BootSelection& selection,
                                                bool transient)
 {
@@ -1111,7 +1216,7 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
 
     switch (selection.source) {
     case BootSource::Sd:
-        if (sd_mounted) {
+        if (manager_sd_mount()) {
             method = program_fpga_from_sd_path(selection.path, slot);
         }
         if (method == FPGA_METHOD_NONE) {
@@ -1122,7 +1227,7 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
         break;
     case BootSource::Flash:
         method = program_fpga_from_flash_slot(info, slot);
-        if (method == FPGA_METHOD_NONE && sd_mounted) {
+        if (method == FPGA_METHOD_NONE && manager_sd_mount()) {
             printf("Selected flash image failed; trying automatic SD image\n");
             boot_logf("Fallback: FLASH -> automatic SD");
             method = program_fpga_from_sd_card(info, slot);
@@ -1138,7 +1243,7 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
         // upgrade cannot strand an otherwise usable context.
         printf("Obsolete golden selection; trying automatic sources\n");
         boot_logf("Fallback: unavailable GOLDEN -> AUTO");
-        if (sd_mounted) {
+        if (manager_sd_mount()) {
             method = program_fpga_from_sd_card(info, slot);
         }
         if (method == FPGA_METHOD_NONE) {
@@ -1147,7 +1252,7 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
         break;
     case BootSource::Auto:
     default:
-        if (sd_mounted) {
+        if (manager_sd_mount()) {
             method = program_fpga_from_sd_card(info, slot);
         }
         if (method == FPGA_METHOD_NONE) {
@@ -1172,7 +1277,7 @@ static fpga_method_t program_context_selection(uint8_t slot, bool sd_mounted,
     return method;
 }
 
-fpga_method_t program_selected_context(uint8_t slot, bool sd_mounted,
+fpga_method_t program_selected_context(uint8_t slot,
                                        bool force_golden)
 {
     if (slot >= std::size(fpga_images)) {
@@ -1183,11 +1288,11 @@ fpga_method_t program_selected_context(uint8_t slot, bool sd_mounted,
         boot_logf("RESET held: force recovery");
         return program_fpga_from_golden_slot(slot);
     }
-    return program_context_selection(slot, sd_mounted,
+    return program_context_selection(slot,
                                      boot_config_selection(slot), false);
 }
 
-fpga_method_t program_transient_context(uint8_t slot, bool sd_mounted,
+fpga_method_t program_transient_context(uint8_t slot,
                                         BootSource source, const char* path)
 {
     BootSelection selection{};
@@ -1195,7 +1300,7 @@ fpga_method_t program_transient_context(uint8_t slot, bool sd_mounted,
     if (source == BootSource::Sd && path) {
         snprintf(selection.path, sizeof(selection.path), "%s", path);
     }
-    return program_context_selection(slot, sd_mounted, selection, true);
+    return program_context_selection(slot, selection, true);
 }
 
 bool program_fpga_from_file(FIL* fil)

@@ -1,5 +1,7 @@
 #include <cstdint>
 
+#include "boot_config.h"
+#include "boot_timing.h"
 #include "firmware_image.h"
 #include "firmware_update_engine.h"
 #include "firmware_update_layout.h"
@@ -80,8 +82,21 @@ int main()
     constexpr BoardRevision board = static_cast<BoardRevision>(K2_BOARD_ID);
     const auto* active = reinterpret_cast<const uint8_t*>(
         firmware_update::kXipBase + firmware_update::kActiveOffset);
+    const uint32_t loader_start = time_us_32();
+    // Read only the selection inputs; do not touch FPGA programming pins.
+    gpio_init(16);
+    gpio_init(17);
+    gpio_init(5);
+    gpio_pull_up(5);
+    boot_config_init();
+    const uint8_t context = (gpio_get_all() >> 16) & 3u;
+    const bool flash_fast_boot = gpio_get(5) &&
+        boot_config_selection(context).source == BootSource::Flash;
     Rp2040FirmwareStorage storage;
-    switch (firmware_update::process_firmware_boot(storage, board)) {
+    const auto decision = firmware_update::process_firmware_boot(
+        storage, board, !flash_fast_boot);
+    save_loader_timing(time_us_32() - loader_start, flash_fast_boot);
+    switch (decision) {
         case BootDecision::StartActive:
             start_active_application(active);
         case BootDecision::EnterUsbRecovery:

@@ -67,7 +67,7 @@ complete context change requires changing the switches and restarting the K2.
 Catalog-view `F3` works only when the highlighted catalog entry has source `SD` and format
 `gzip`. `AUTO`, `FLASH`, `GOLDEN`, and raw `.bin` entries cannot be copied this
 way. The RP2040 verifies every programmed flash page by readback and commits
-the gzip header page last. While copying, the area below the catalog shows
+the allocation metadata only after the complete image is verified. While copying, the area below the catalog shows
 separate flash-erase, image-write, and metadata-finalization stages, a
 percentage bar, and confirmed KiB counts.
 
@@ -124,10 +124,12 @@ as the default and run it, or catalog-view `F3` to copy it from manager SD into
 flash when it is a gzip image.
 
 Local-view `F3` bypasses the manager SD and streams a gzip directly into the
-replaceable flash slot for the displayed context. Raw `.bin` files and gzip
-files larger than the 2 MiB slot are rejected before erasure. The flash upload
+logical flash slot for the displayed context. Raw `.bin` files and gzip
+files larger than the shared 8 MiB pool are rejected. Firmware allocates free
+64 KiB blocks and retains the previous core until commit. If space is
+insufficient, the manager asks you to delete a flash core and retry. The flash upload
 uses the same two-pass local-file validation, acknowledged byte counts, CRC-32,
-gzip trailer check, page readback, first-page-last commit, filename metadata,
+gzip trailer check, page readback, transactional allocation metadata,
 and progress display. It does not change the saved boot selection or run the
 core. This path remains available when the RP2040 SD card is absent; `F5` then
 reports that manager-SD installation is unavailable.
@@ -199,3 +201,8 @@ Loaded SD: CNTX1/WildbitsK2_example.bin.gz
 
 The log is a bounded RAM buffer. It is cleared whenever the RP2040 reboots and
 does not cause flash wear.
+
+Firmware 1.17 requires a one-time full UF2 install for loader ABI 2. The first
+flash write migrates existing cores in place; unrecognized legacy data stays
+reserved until explicitly deleted. See the main README for allocation and
+firmware downgrade rules.

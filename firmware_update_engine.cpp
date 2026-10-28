@@ -1,3 +1,4 @@
+#include "core_store.h"
 #include "firmware_update_engine.h"
 
 #include <algorithm>
@@ -74,11 +75,18 @@ const uint8_t* image_at(FirmwareStorage& storage, uint32_t offset)
     return storage.read(offset, kApplicationSlotSize);
 }
 
+bool pool_compatible(FirmwareStorage& storage, const uint8_t* image)
+{
+    const auto* manifest = reinterpret_cast<const FirmwareImageManifest*>(image);
+    return !core_store::requires_pool_firmware(storage) || manifest->required_loader_abi >= 2;
+}
+
 bool image_valid(FirmwareStorage& storage, uint32_t offset,
                  BoardRevision board)
 {
     const uint8_t* image = image_at(storage, offset);
-    return image && validate_firmware_image(image, board) == ImageValidation::Ok;
+    return image && pool_compatible(storage, image) &&
+        validate_firmware_image(image, board) == ImageValidation::Ok;
 }
 
 const FirmwareImageManifest* manifest_at(FirmwareStorage& storage,
@@ -435,7 +443,8 @@ StorageResult confirm_running_firmware(FirmwareStorage& storage,
 }
 
 BootDecision process_firmware_boot(FirmwareStorage& storage,
-                                   BoardRevision board)
+                                   BoardRevision board,
+                                   bool verify_confirmed_payload)
 {
     UpdateJournalStatus journal = read_update_journal(storage, board);
     if (!journal.valid) {
@@ -445,6 +454,13 @@ BootDecision process_firmware_boot(FirmwareStorage& storage,
     const UpdateState state =
         static_cast<UpdateState>(journal.record.state);
     if (state == UpdateState::Confirmed) {
+        if (!verify_confirmed_payload) {
+            const uint8_t* active = image_at(storage, kActiveOffset);
+            if (active && pool_compatible(storage, active) &&
+                validate_firmware_boot(active, board) == ImageValidation::Ok) {
+                return BootDecision::StartActive;
+            }
+        }
         return recover_without_update(storage, board, journal);
     }
 
