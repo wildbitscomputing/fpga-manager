@@ -136,6 +136,12 @@ During either operation, the validation pass reports bytes scanned. The write
 pass shows a percentage and the byte count acknowledged by the RP2040 rather
 than merely the amount read from the local file.
 
+Core imports and `.k2fw` updates also support older MicroKernels whose
+`ReadData` call incorrectly leaves carry set after a successful copy. The
+manager checks the file-data event's buffer and length before copying and
+ignores that call's carry flag. File read/close failures and file-error events
+still report `E5`; RP2040-SD write failures report `$14`.
+
 ### Updating the FPGA Manager firmware
 
 The firmware update path is independent of the optional RP2040 SD card:

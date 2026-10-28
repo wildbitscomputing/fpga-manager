@@ -68,6 +68,7 @@ EVENT_DIRECTORY_EOF     = $44
 EVENT_DIRECTORY_CLOSED  = $46
 EVENT_DIRECTORY_ERROR   = $48
 EVENT_TYPE              = event_buffer+0
+EVENT_DATA_BUFFER       = event_buffer+1
 EVENT_KEY_RAW           = event_buffer+4
 EVENT_KEY_ASCII         = event_buffer+5
 EVENT_STREAM            = event_buffer+3
@@ -2067,7 +2068,15 @@ transfer_data:
             lda     EVENT_STREAM
             cmp     transfer_stream
             bne     transfer_event_loop
+            ; ReadData in older MicroKernels leaves carry set even after a
+            ; successful copy. Its only failure is a missing event buffer:
+            ; check that explicitly, and bound the count before copying.
+            lda     EVENT_DATA_BUFFER
+            beq     transfer_file_failure
             lda     EVENT_FILE_READ_COUNT
+            beq     transfer_file_failure ; zero requests 256 bytes from ReadData
+            cmp     #MAX_PAYLOAD+1
+            bcs     transfer_file_failure
             sta     chunk_length
             sta     KARGS_BUFLEN
             lda     #<io_buffer
@@ -2075,7 +2084,8 @@ transfer_data:
             lda     #>io_buffer
             sta     KARGS_BUF+1
             jsr     KERNEL_READ_DATA
-            bcs     transfer_file_failure
+            ; Ignore only ReadData's unreliable carry. File.Read/File.Close
+            ; failures and FILE_ERROR/FILE_NOT_FOUND events still report E5.
             lda     transfer_phase
             bne     transfer_upload_data
             jsr     scan_chunk
