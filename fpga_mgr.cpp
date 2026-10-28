@@ -8,6 +8,7 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "hardware/regs/pio.h"
 #include "hardware/structs/sio.h"
 #include "hardware/watchdog.h"
 #include "hardware/xosc.h"
@@ -87,8 +88,10 @@
 #define FPGA_DATA_MASK       0x0000FF00u
 #define FPGA_CCLK_MASK       (1u << FPGA_CONFIG_CCLK)
 #define FPGA_INIT_TIMEOUT_MS 100
+#define FPGA_PIO_DRAIN_TIMEOUT_MS 100
+#define STARTUP_RESET_HOLD_MS 500
 #define RESET_HOLD_SAMPLE_MS 100
-#define RESET_HOLD_SECONDS   5
+#define RESET_HOLD_SECONDS   2
 #define RESET_HOLD_TICKS     ((RESET_HOLD_SECONDS * 1000) / RESET_HOLD_SAMPLE_MS)
 
 // Prototypes
@@ -203,6 +206,24 @@ void start_reset_hold_monitor(void)
     }
 }
 
+static bool startup_requests_recovery(void)
+{
+    // Normal boots do not wait. If RESET starts low, sample it until either
+    // it is released or the recovery hold interval has elapsed.
+    if (gpio_get(FPGA_SYSTEM_RSTn)) {
+        return false;
+    }
+    const absolute_time_t deadline = make_timeout_time_ms(STARTUP_RESET_HOLD_MS);
+    do {
+        sleep_ms(1);
+        firmware_trial_watchdog_feed();
+        if (gpio_get(FPGA_SYSTEM_RSTn)) {
+            return false;
+        }
+    } while (!time_reached(deadline));
+    return true;
+}
+
 #if USE_PIO_FPGA
 static PIO fpga_pio = pio0;
 static int fpga_sm = -1;
@@ -248,6 +269,9 @@ static void fpga_pio_begin(void)
 
 static void fpga_pio_set_gpio_mode(void)
 {
+    // The drained PIO stalls with CCLK low. Match that level before switching
+    // pin ownership so the SIO latch cannot introduce an extra rising edge.
+    gpio_put(FPGA_CONFIG_CCLK, 0);
     for (uint i = 0; i < 8; i++) {
         gpio_set_function(FPGA_BUS_D0 + i, GPIO_FUNC_SIO);
         gpio_set_dir(FPGA_BUS_D0 + i, GPIO_OUT);
@@ -271,10 +295,33 @@ static void fpga_pio_enable(bool enable)
     }
     if (enable) {
         fpga_pio_set_pio_mode();
+        pio_sm_set_enabled(fpga_pio, fpga_sm, true);
     } else {
+        pio_sm_set_enabled(fpga_pio, fpga_sm, false);
         fpga_pio_set_gpio_mode();
     }
-    pio_sm_set_enabled(fpga_pio, fpga_sm, enable);
+}
+
+static bool fpga_pio_wait_for_idle(void)
+{
+    if (!fpga_pio_inited) {
+        return false;
+    }
+    // All DMA writes must be complete before calling this. TXEMPTY alone is
+    // insufficient: the last byte may still be in the output shift register.
+    // fpga_out emits its rising CCLK edge before wrapping to OUT with autopull.
+    // A fresh TXSTALL at that OUT proves the final byte and clock completed.
+    const uint32_t stall_mask = 1u << (PIO_FDEBUG_TXSTALL_LSB + fpga_sm);
+    fpga_pio->fdebug = stall_mask; // W1C: discard stalls from earlier chunks.
+    const absolute_time_t deadline =
+        make_timeout_time_ms(FPGA_PIO_DRAIN_TIMEOUT_MS);
+    while ((fpga_pio->fdebug & stall_mask) == 0) {
+        if (time_reached(deadline)) {
+            return false;
+        }
+        tight_loop_contents();
+    }
+    return true;
 }
 #endif
 
@@ -434,10 +481,7 @@ int main()
     // Holding the active-low system reset for at least 500 ms during manager
     // startup forces recovery. Physical contexts 1 and 4 expose the same
     // embedded image.
-    bool force_golden = !gpio_get(FPGA_SYSTEM_RSTn);
-    sleep_ms(500);
-    firmware_trial_watchdog_feed();
-    force_golden = force_golden && !gpio_get(FPGA_SYSTEM_RSTn);
+    const bool force_golden = startup_requests_recovery();
 
     absolute_time_t start = get_absolute_time();
 
@@ -724,7 +768,13 @@ static bool wait_for_fpga_init(bool high)
 static bool finish_fpga_programming()
 {
 #if USE_PIO_FPGA
+    const bool drained = fpga_pio_wait_for_idle();
     fpga_pio_enable(false);
+    if (!drained) {
+        printf("FPGA configuration failed: PIO transmit drain timed out\n");
+        boot_logf("Reject: FPGA PIO transmit drain timeout");
+        return false;
+    }
 #endif
     gpio_set_dir(FPGA_SYSTEM_RSTn, GPIO_OUT);
     for (unsigned int k = 0; k < 100; ++k) {
